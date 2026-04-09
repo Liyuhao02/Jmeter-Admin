@@ -1,0 +1,16 @@
+.DS_Store
+.gocache/
+.qoder/
+temp/
+
+jmeter-admin
+*.log
+*.out
+
+data/
+uploads/
+results/
+
+web/node_modules/
+web/dist/
+

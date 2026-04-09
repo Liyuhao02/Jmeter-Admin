@@ -1,0 +1,25 @@
+# JMeter Admin 配置文件
+# 修改后需重启服务生效（master_hostname 除外，可通过页面实时修改）
+
+# 后端服务配置
+server:
+  port: 8080                          # HTTP 服务监听端口
+
+# 前端开发配置（仅开发模式使用）
+frontend:
+  port: 3000                          # 前端 Vite 开发服务器端口
+
+# JMeter 配置
+jmeter:
+  path: "jmeter"                      # JMeter 可执行文件路径（需在 PATH 中或使用绝对路径）
+  master_hostname: "192.168.62.225"   # Master 节点 IP（多网卡时必填，可在页面动态配置）
+
+# Slave 节点配置
+slave:
+  heartbeat_interval: 30              # 心跳检测间隔（秒）
+
+# 数据目录配置
+dirs:
+  data: "./data"                      # SQLite 数据库存储目录
+  uploads: "./uploads"                # 脚本和附件上传目录
+  results: "./results"                # 执行结果和报告存储目录
