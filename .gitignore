@@ -1,6 +1,7 @@
 .DS_Store
 .gocache/
-.qoder/
+.qoder/*
+!.qoder/repowiki/
 temp/
 
 jmeter-admin
