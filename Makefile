@@ -7,6 +7,7 @@ build-frontend:
 # 构建后端（嵌入前端）
 build-backend:
 	CGO_ENABLED=1 go build -o jmeter-admin .
+	CGO_ENABLED=1 go build -o jmeter-agent ./cmd/agent/
 
 # 构建全部
 build-all: build-frontend build-backend
@@ -15,10 +16,11 @@ build-all: build-frontend build-backend
 build-linux:
 	cd web && npm install && npm run build
 	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o jmeter-admin .
+	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o jmeter-agent ./cmd/agent/
 
 # 清理构建产物
 clean:
-	rm -f jmeter-admin
+	rm -f jmeter-admin jmeter-agent
 	rm -rf web/dist
 
 # 运行

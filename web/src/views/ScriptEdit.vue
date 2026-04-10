@@ -44,6 +44,11 @@
               <el-icon><RefreshRight /></el-icon>
             </el-button>
           </el-tooltip>
+          <el-tooltip content="版本历史" placement="top">
+            <el-button circle @click="openVersionHistory">
+              <el-icon><Clock /></el-icon>
+            </el-button>
+          </el-tooltip>
           <el-tag
             size="small"
             :type="hasUnsavedChanges ? 'warning' : 'success'"
@@ -83,6 +88,10 @@
         
         <!-- XML源码模式 -->
         <div class="editor-wrapper" v-show="editMode === 'xml'">
+          <div v-if="monacoLoadingState" class="monaco-loading">
+            <el-icon class="loading-icon"><Loading /></el-icon>
+            <span>正在加载编辑器...</span>
+          </div>
           <div ref="editorContainer" class="monaco-editor-container"></div>
         </div>
       </div>
@@ -244,6 +253,62 @@
       </template>
     </el-dialog>
 
+    <!-- 版本历史抽屉 -->
+    <el-drawer
+      v-model="versionDrawerVisible"
+      title="版本历史"
+      direction="rtl"
+      size="420px"
+      :destroy-on-close="false"
+      class="version-drawer"
+    >
+      <div class="version-timeline" v-loading="versionsLoading">
+        <div v-if="versions.length === 0" class="empty-versions">
+          暂无版本记录
+        </div>
+        <div
+          v-for="ver in versions"
+          :key="ver.id"
+          class="version-item"
+          :class="{ active: selectedVersion?.id === ver.id }"
+          @click="selectVersion(ver)"
+        >
+          <div class="version-header">
+            <span class="version-number">v{{ ver.version_number }}</span>
+            <span class="version-time">{{ formatFileTime(ver.created_at) }}</span>
+          </div>
+          <div class="version-summary">{{ ver.change_summary }}</div>
+          <div class="version-actions" v-if="selectedVersion?.id === ver.id">
+            <el-button size="small" @click.stop="previewVersion(ver)">
+              预览内容
+            </el-button>
+            <el-button size="small" type="warning" @click.stop="confirmRestore(ver)">
+              回滚到此版本
+            </el-button>
+          </div>
+        </div>
+      </div>
+    </el-drawer>
+
+    <!-- 版本预览弹窗 -->
+    <el-dialog
+      v-model="versionPreviewVisible"
+      :title="`版本 ${previewingVersion?.version_number} 预览`"
+      width="70%"
+      top="5vh"
+      class="version-preview-dialog"
+    >
+      <div class="version-preview-content" v-loading="previewLoading">
+        <pre class="xml-preview">{{ previewContent }}</pre>
+      </div>
+      <template #footer>
+        <el-button @click="versionPreviewVisible = false">关闭</el-button>
+        <el-button type="warning" @click="confirmRestore(previewingVersion)">
+          回滚到此版本
+        </el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog
       v-model="savePreviewVisible"
       title="保存前差异预览"
@@ -299,13 +364,32 @@ import {
   Warning,
   View,
   RefreshLeft,
-  RefreshRight
+  RefreshRight,
+  Loading,
+  Clock
 } from '@element-plus/icons-vue'
-import * as monaco from 'monaco-editor'
 import { scriptApi } from '@/api/script'
 import JmxTreeEditor from '@/components/JmxTreeEditor.vue'
 import { extractCSVDataSetFilesFromXML, parseJMX } from '@/utils/jmxParser.js'
 import { formatDateTimeInShanghai } from '@/utils/datetime'
+
+// Monaco Editor 动态导入
+let monaco = null
+let monacoLoading = false
+let monacoLoadPromise = null
+
+const loadMonaco = async () => {
+  if (monaco) return monaco
+  if (monacoLoadPromise) return monacoLoadPromise
+
+  monacoLoading = true
+  monacoLoadPromise = import('monaco-editor').then((module) => {
+    monaco = module
+    monacoLoading = false
+    return monaco
+  })
+  return monacoLoadPromise
+}
 
 const route = useRoute()
 const router = useRouter()
@@ -335,12 +419,24 @@ let diffEditor = null
 let diffOriginalModel = null
 let diffModifiedModel = null
 
+// Monaco 加载状态
+const monacoLoadingState = ref(false)
+
 // 文件上传
 const uploadDialogVisible = ref(false)
 const pendingFiles = ref([])
 const uploadRef = ref(null)
 const targetUploadFilename = ref('')
 const savePreviewVisible = ref(false)
+
+// 版本管理相关状态
+const versionDrawerVisible = ref(false)
+const versions = ref([])
+const versionsLoading = ref(false)
+const selectedVersion = ref(null)
+const versionPreviewVisible = ref(false)
+const previewingVersion = ref(null)
+const previewLoading = ref(false)
 
 // 编辑历史
 const historyStack = ref([])
@@ -555,56 +651,68 @@ const fetchScriptContent = async () => {
     historyReady.value = false
     xmlContent.value = content
     originalContent.value = content
-    
-    // 初始化 Monaco Editor
-    initEditor(content)
+
+    // 只有在 XML 模式下才初始化 Monaco Editor
+    if (editMode.value === 'xml') {
+      await initEditor(content)
+    }
     resetHistory(content)
   } catch (error) {
     console.error('获取脚本内容失败:', error)
     ElMessage.error('获取脚本内容失败')
-    initEditor('')
     resetHistory('')
   }
 }
 
 // 初始化 Monaco Editor
-const initEditor = (content) => {
+const initEditor = async (content) => {
   if (!editorContainer.value) return
   if (editor) {
     editor.setValue(content || '')
     return
   }
 
-  editor = monaco.editor.create(editorContainer.value, {
-    value: content,
-    language: 'xml',
-    theme: 'vs-dark',
-    automaticLayout: true,
-    minimap: { enabled: true },
-    fontSize: 14,
-    wordWrap: 'on',
-    scrollBeyondLastLine: false,
-    lineNumbers: 'on',
-    roundedSelection: false,
-    scrollbar: {
-      useShadows: false,
-      verticalHasArrows: true,
-      horizontalHasArrows: true,
-      vertical: 'auto',
-      horizontal: 'auto'
-    }
-  })
+  // 动态加载 Monaco
+  monacoLoadingState.value = true
+  try {
+    const monacoModule = await loadMonaco()
 
-  editor.onDidChangeModelContent(() => {
-    xmlContent.value = editor?.getValue() || ''
-  })
+    editor = monacoModule.editor.create(editorContainer.value, {
+      value: content,
+      language: 'xml',
+      theme: 'vs-dark',
+      automaticLayout: true,
+      minimap: { enabled: true },
+      fontSize: 14,
+      wordWrap: 'on',
+      scrollBeyondLastLine: false,
+      lineNumbers: 'on',
+      roundedSelection: false,
+      scrollbar: {
+        useShadows: false,
+        verticalHasArrows: true,
+        horizontalHasArrows: true,
+        vertical: 'auto',
+        horizontal: 'auto'
+      }
+    })
+
+    editor.onDidChangeModelContent(() => {
+      xmlContent.value = editor?.getValue() || ''
+    })
+  } finally {
+    monacoLoadingState.value = false
+  }
 }
 
-const initDiffEditor = () => {
+const initDiffEditor = async () => {
   if (!diffContainer.value) return
 
+  // 动态加载 Monaco
+  const monacoModule = await loadMonaco()
+
   if (!diffEditor) {
-    diffEditor = monaco.editor.createDiffEditor(diffContainer.value, {
+    diffEditor = monacoModule.editor.createDiffEditor(diffContainer.value, {
       theme: 'vs-dark',
       readOnly: true,
       automaticLayout: true,
@@ -619,8 +727,8 @@ const initDiffEditor = () => {
   diffOriginalModel?.dispose()
   diffModifiedModel?.dispose()
 
-  diffOriginalModel = monaco.editor.createModel(originalContent.value || '', 'xml')
-  diffModifiedModel = monaco.editor.createModel(previewContent.value || '', 'xml')
+  diffOriginalModel = monacoModule.editor.createModel(originalContent.value || '', 'xml')
+  diffModifiedModel = monacoModule.editor.createModel(previewContent.value || '', 'xml')
   diffEditor.setModel({
     original: diffOriginalModel,
     modified: diffModifiedModel
@@ -661,14 +769,17 @@ const switchToVisual = () => {
 }
 
 // 切换到 XML 模式
-const switchToXml = () => {
+const switchToXml = async () => {
   if (editMode.value === 'xml') return
-  
-  // 从 JmxTreeEditor 同步内容到 Monaco Editor
-  // xmlContent 已经通过 v-model 与 JmxTreeEditor 双向绑定
-  syncEditorContent(xmlContent.value || '')
-  
+
+  // 先切换到 XML 模式，显示加载状态
   editMode.value = 'xml'
+
+  // 等待 DOM 更新
+  await nextTick()
+
+  // 动态加载 Monaco 并初始化编辑器
+  await initEditor(xmlContent.value || '')
 }
 
 const openSavePreview = async () => {
@@ -900,6 +1011,76 @@ const handleKeydown = (event) => {
     event.preventDefault()
     openSavePreview()
   }
+}
+
+// 加载版本列表
+const loadVersions = async () => {
+  versionsLoading.value = true
+  try {
+    const res = await scriptApi.getVersions(scriptId)
+    versions.value = res.data || []
+  } catch (err) {
+    console.error('加载版本列表失败', err)
+    ElMessage.error('加载版本列表失败')
+  } finally {
+    versionsLoading.value = false
+  }
+}
+
+// 打开版本历史
+const openVersionHistory = () => {
+  versionDrawerVisible.value = true
+  selectedVersion.value = null
+  loadVersions()
+}
+
+// 选中版本
+const selectVersion = (ver) => {
+  selectedVersion.value = selectedVersion.value?.id === ver.id ? null : ver
+}
+
+// 预览版本
+const previewVersion = async (ver) => {
+  previewingVersion.value = ver
+  previewLoading.value = true
+  versionPreviewVisible.value = true
+  try {
+    const res = await scriptApi.getVersionContent(scriptId, ver.id)
+    previewContent.value = res.data?.content || ''
+  } catch (err) {
+    previewContent.value = '加载失败'
+    ElMessage.error('加载版本内容失败')
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+// 确认回滚
+const confirmRestore = (ver) => {
+  if (!ver) return
+  ElMessageBox.confirm(
+    `确定要回滚到版本 ${ver.version_number} 吗？当前未保存的更改将丢失。`,
+    '确认回滚',
+    {
+      confirmButtonText: '确认回滚',
+      cancelButtonText: '取消',
+      type: 'warning'
+    }
+  ).then(async () => {
+    try {
+      await scriptApi.restoreVersion(scriptId, ver.id)
+      ElMessage.success(`已回滚到版本 ${ver.version_number}`)
+      // 重新加载脚本内容
+      await fetchScriptContent()
+      // 刷新版本列表
+      await loadVersions()
+      // 关闭预览弹窗和抽屉
+      versionPreviewVisible.value = false
+      versionDrawerVisible.value = false
+    } catch (err) {
+      ElMessage.error('回滚失败: ' + (err.message || '未知错误'))
+    }
+  }).catch(() => {})
 }
 
 onMounted(async () => {
@@ -1137,7 +1318,8 @@ onBeforeUnmount(() => {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
-  
+  position: relative;
+
   // 让 JmxTreeEditor 和 Monaco 都能撑满
   & > * {
     flex: 1;
@@ -1152,6 +1334,34 @@ onBeforeUnmount(() => {
   overflow: hidden;
   background: var(--bg-card);
   border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.monaco-loading {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  z-index: 10;
+  color: var(--text-secondary);
+  font-size: 14px;
+
+  .loading-icon {
+    font-size: 32px;
+    animation: spin 1s linear infinite;
+  }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 // 右侧文件面板
@@ -1547,6 +1757,108 @@ onBeforeUnmount(() => {
     max-width: none;
     min-width: 0;
   }
+}
+
+// 版本历史抽屉样式
+.version-drawer {
+  :deep(.el-drawer__header) {
+    margin-bottom: 0;
+    padding: 16px 20px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+
+  :deep(.el-drawer__body) {
+    padding: 16px;
+    background: var(--bg-primary);
+  }
+}
+
+.version-timeline {
+  padding: 0 4px;
+}
+
+.version-item {
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  transition: all 0.2s;
+  border: 1px solid transparent;
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  &.active {
+    border-color: rgba(56, 189, 248, 0.5);
+    background: rgba(56, 189, 248, 0.08);
+  }
+}
+
+.version-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.version-number {
+  font-weight: 600;
+  color: #38bdf8;
+  font-size: 14px;
+}
+
+.version-time {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+}
+
+.version-summary {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.version-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.empty-versions {
+  text-align: center;
+  color: rgba(255, 255, 255, 0.4);
+  padding: 40px 0;
+}
+
+// 版本预览弹窗样式
+.version-preview-dialog {
+  :deep(.el-dialog__body) {
+    padding: 16px 20px;
+    background: var(--bg-card);
+  }
+}
+
+.version-preview-content {
+  min-height: 200px;
+}
+
+.xml-preview {
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  padding: 16px;
+  max-height: 60vh;
+  overflow: auto;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.85);
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
 }
 
 @media (max-width: 900px) {

@@ -127,6 +127,26 @@
         </div>
       </div>
 
+      <div v-if="executionMode === 'distributed'" class="detail-section">
+        <div class="detail-switch-row">
+          <div class="detail-copy">
+            <div class="section-label">CSV 数据分片</div>
+            <div class="detail-desc">
+              分布式模式下自动将 CSV 文件按节点数均匀拆分，每个节点只读取属于自己的那部分数据，避免 token/参数重复消费。
+            </div>
+          </div>
+          <el-switch
+            v-model="splitCSV"
+            inline-prompt
+            active-text="开启"
+            inactive-text="关闭"
+          />
+        </div>
+        <div v-if="splitCSV" class="detail-notice">
+          执行前将自动拆分脚本中引用的 CSV 文件，并通过 Agent 分发到各 Slave 节点。请确保所有 Slave 的 Agent 服务已启动。
+        </div>
+      </div>
+
       <!-- Slave节点选择（分布式模式展开） -->
       <transition name="slide-down">
         <div v-show="executionMode === 'distributed'" class="slave-section">
@@ -258,6 +278,7 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, Warning, VideoPlay, InfoFilled, CircleCheckFilled, WarningFilled } from '@element-plus/icons-vue'
 import { slaveApi } from '@/api/slave'
@@ -280,6 +301,8 @@ const props = defineProps({
 
 const emit = defineEmits(['update:visible', 'success'])
 
+const router = useRouter()
+
 // 数据状态
 const executionMode = ref('local')
 const slaves = ref([])
@@ -289,6 +312,7 @@ const executing = ref(false)
 const remarks = ref('')
 const saveHTTPDetails = ref(false)
 const includeMaster = ref(false)
+const splitCSV = ref(false)
 const masterHostname = ref('')
 const networkInterfaces = ref([])
 
@@ -339,6 +363,7 @@ const resetForm = () => {
   remarks.value = ''
   saveHTTPDetails.value = false
   includeMaster.value = false
+  splitCSV.value = false
   masterHostname.value = ''
   networkInterfaces.value = []
 }
@@ -469,12 +494,34 @@ const handleExecute = async () => {
       slave_ids: executionMode.value === 'distributed' ? selectedSlaves.value : [],
       remarks: remarks.value,
       save_http_details: saveHTTPDetails.value,
-      include_master: executionMode.value === 'distributed' ? includeMaster.value : false
+      include_master: executionMode.value === 'distributed' ? includeMaster.value : false,
+      split_csv: executionMode.value === 'distributed' ? splitCSV.value : false
     }
-    await executionApi.create(data)
+    const res = await executionApi.create(data)
+    const newExecutionId = res.data?.id
+    
     ElMessage.success('执行已启动')
     emit('success')
     emit('update:visible', false)
+    
+    // 弹出选择框，询问是否查看详情
+    if (newExecutionId) {
+      setTimeout(() => {
+        ElMessageBox.confirm(
+          '执行任务已创建成功，是否立即查看执行详情？',
+          '执行成功',
+          {
+            confirmButtonText: '查看详情',
+            cancelButtonText: '留在当前页',
+            type: 'success',
+          }
+        ).then(() => {
+          router.push({ path: `/executions/${newExecutionId}` })
+        }).catch(() => {
+          // 留在当前页，不做任何操作
+        })
+      }, 300)
+    }
   } catch (error) {
     console.error('启动执行失败:', error)
     ElMessage.error(error.response?.data?.message || '启动执行失败')

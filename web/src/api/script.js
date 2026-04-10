@@ -69,5 +69,20 @@ export const scriptApi = {
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
+  },
+
+  // 获取版本列表
+  getVersions(id) {
+    return request.get(`/api/scripts/${id}/versions`)
+  },
+
+  // 获取指定版本内容
+  getVersionContent(id, versionId) {
+    return request.get(`/api/scripts/${id}/versions/${versionId}`)
+  },
+
+  // 回滚到指定版本
+  restoreVersion(id, versionId) {
+    return request.post(`/api/scripts/${id}/versions/${versionId}/restore`)
   }
 }

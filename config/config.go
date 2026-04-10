@@ -24,8 +24,9 @@ type FrontendConfig struct {
 }
 
 type JMeterConfig struct {
-	Path           string `yaml:"path"`            // JMeter 可执行文件路径
-	MasterHostname string `yaml:"master_hostname"` // RMI 回调 IP，多网卡时必填
+	Path            string `yaml:"path"`               // JMeter 可执行文件路径
+	MasterHostname  string `yaml:"master_hostname"`    // RMI 回调 IP，多网卡时必填
+	AgentCSVDataDir string `yaml:"agent_csv_data_dir"` // Slave Agent 的 CSV 数据目录
 }
 
 type SlaveConfig struct {
@@ -50,7 +51,8 @@ func LoadConfig(configPath string) error {
 			Port: 3000,
 		},
 		JMeter: JMeterConfig{
-			Path: "jmeter",
+			Path:            "jmeter",
+			AgentCSVDataDir: "/opt/jmeter/csv-data",
 		},
 		Slave: SlaveConfig{
 			HeartbeatInterval: 30,

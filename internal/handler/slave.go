@@ -25,9 +25,11 @@ func ListSlaves(c *gin.Context) {
 
 // CreateSlaveRequest 创建slave请求参数
 type CreateSlaveRequest struct {
-	Name string `json:"name" binding:"required"`
-	Host string `json:"host" binding:"required"`
-	Port int    `json:"port" binding:"required"`
+	Name       string `json:"name" binding:"required"`
+	Host       string `json:"host" binding:"required"`
+	Port       int    `json:"port" binding:"required"`
+	AgentPort  int    `json:"agent_port"`
+	AgentToken string `json:"agent_token"`
 }
 
 // CreateSlave POST /api/slaves
@@ -38,7 +40,12 @@ func CreateSlave(c *gin.Context) {
 		return
 	}
 
-	slave, err := service.CreateSlave(req.Name, req.Host, req.Port)
+	// 默认 Agent 端口
+	if req.AgentPort == 0 {
+		req.AgentPort = 8089
+	}
+
+	slave, err := service.CreateSlave(req.Name, req.Host, req.Port, req.AgentPort, req.AgentToken)
 	if err != nil {
 		c.JSON(http.StatusOK, model.Error(err.Error()))
 		return
@@ -49,9 +56,11 @@ func CreateSlave(c *gin.Context) {
 
 // UpdateSlaveRequest 更新slave请求参数
 type UpdateSlaveRequest struct {
-	Name string `json:"name" binding:"required"`
-	Host string `json:"host" binding:"required"`
-	Port int    `json:"port" binding:"required"`
+	Name       string `json:"name" binding:"required"`
+	Host       string `json:"host" binding:"required"`
+	Port       int    `json:"port" binding:"required"`
+	AgentPort  int    `json:"agent_port"`
+	AgentToken string `json:"agent_token"`
 }
 
 // UpdateSlave PUT /api/slaves/:id
@@ -69,7 +78,12 @@ func UpdateSlave(c *gin.Context) {
 		return
 	}
 
-	if err := service.UpdateSlave(id, req.Name, req.Host, req.Port); err != nil {
+	// 默认 Agent 端口
+	if req.AgentPort == 0 {
+		req.AgentPort = 8089
+	}
+
+	if err := service.UpdateSlave(id, req.Name, req.Host, req.Port, req.AgentPort, req.AgentToken); err != nil {
 		c.JSON(http.StatusOK, model.Error(err.Error()))
 		return
 	}
@@ -103,21 +117,29 @@ func CheckSlave(c *gin.Context) {
 		return
 	}
 
-	isOnline, err := service.CheckSlave(id)
+	// 同时检测 JMeter RMI 和 Agent
+	result, err := service.CheckSlaveBoth(id)
 	if err != nil {
 		c.JSON(http.StatusOK, model.Error(err.Error()))
 		return
 	}
 
-	// 同时返回 online 和 status 字段，兼容前端
-	status := "offline"
-	if isOnline {
-		status = "online"
+	// 构建状态字符串
+	jmeterStatus := "offline"
+	if result.JMeterOnline {
+		jmeterStatus = "online"
+	}
+	agentStatus := "offline"
+	if result.AgentOnline {
+		agentStatus = "online"
 	}
 
 	c.JSON(http.StatusOK, model.Success(gin.H{
-		"online": isOnline,
-		"status": status,
+		"online":       result.JMeterOnline,
+		"status":       jmeterStatus,
+		"agent_online": result.AgentOnline,
+		"agent_status": agentStatus,
+		"diagnostic":   result,
 	}))
 }
 
@@ -207,23 +229,33 @@ func GetHeartbeatStatus(c *gin.Context) {
 
 	// 构建心跳状态列表
 	type HeartbeatInfo struct {
-		ID            int64  `json:"id"`
-		Name          string `json:"name"`
-		Host          string `json:"host"`
-		Port          int    `json:"port"`
-		Status        string `json:"status"`
-		LastCheckTime string `json:"last_check_time"`
+		ID             int64  `json:"id"`
+		Name           string `json:"name"`
+		Host           string `json:"host"`
+		Port           int    `json:"port"`
+		Status         string `json:"status"`
+		AgentPort      int    `json:"agent_port"`
+		AgentStatus    string `json:"agent_status"`
+		LastCheckTime  string `json:"last_check_time"`
+		AgentCheckTime string `json:"agent_check_time"`
+		SystemStats    string `json:"system_stats"`
+		AgentUptime    int64  `json:"agent_uptime"`
 	}
 
 	var heartbeatList []HeartbeatInfo
 	for _, slave := range slaves {
 		heartbeatList = append(heartbeatList, HeartbeatInfo{
-			ID:            slave.ID,
-			Name:          slave.Name,
-			Host:          slave.Host,
-			Port:          slave.Port,
-			Status:        slave.Status,
-			LastCheckTime: slave.LastCheckTime,
+			ID:             slave.ID,
+			Name:           slave.Name,
+			Host:           slave.Host,
+			Port:           slave.Port,
+			Status:         slave.Status,
+			AgentPort:      slave.AgentPort,
+			AgentStatus:    slave.AgentStatus,
+			LastCheckTime:  slave.LastCheckTime,
+			AgentCheckTime: slave.AgentCheckTime,
+			SystemStats:    slave.SystemStats,
+			AgentUptime:    slave.AgentUptime,
 		})
 	}
 

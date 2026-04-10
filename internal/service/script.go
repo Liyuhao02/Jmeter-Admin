@@ -2,7 +2,9 @@ package service
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/xml"
 	"fmt"
 	"os"
@@ -274,6 +276,161 @@ func SaveScriptContent(id int64, content string) error {
 	_, err = database.DB.Exec("UPDATE scripts SET updated_at = ? WHERE id = ?", now, id)
 	if err != nil {
 		return fmt.Errorf("更新脚本时间失败: %w", err)
+	}
+
+	// 自动创建版本记录
+	if err := createScriptVersion(id, content, ""); err != nil {
+		// 版本记录失败不影响主流程，仅记录错误
+		fmt.Printf("创建脚本版本记录失败: %v\n", err)
+	}
+
+	return nil
+}
+
+// createScriptVersion 创建脚本版本记录
+func createScriptVersion(scriptID int64, content, changeSummary string) error {
+	// 计算内容hash
+	hash := sha256.Sum256([]byte(content))
+	contentHash := hex.EncodeToString(hash[:])
+
+	// 查询最新版本的hash
+	var latestHash string
+	err := database.DB.QueryRow(
+		"SELECT content_hash FROM script_versions WHERE script_id = ? ORDER BY version_number DESC LIMIT 1",
+		scriptID,
+	).Scan(&latestHash)
+
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("查询最新版本hash失败: %w", err)
+	}
+
+	// 如果hash相同，说明内容未变，跳过创建
+	if err == nil && latestHash == contentHash {
+		return nil
+	}
+
+	// 获取最新版本号
+	var latestVersion int
+	err = database.DB.QueryRow(
+		"SELECT COALESCE(MAX(version_number), 0) FROM script_versions WHERE script_id = ?",
+		scriptID,
+	).Scan(&latestVersion)
+	if err != nil {
+		return fmt.Errorf("查询最新版本号失败: %w", err)
+	}
+
+	// 自动生成change_summary
+	if changeSummary == "" {
+		changeSummary = fmt.Sprintf("版本 %d", latestVersion+1)
+	}
+
+	// 插入新版本
+	now := time.Now().Format("2006-01-02 15:04:05")
+	_, err = database.DB.Exec(
+		"INSERT INTO script_versions (script_id, version_number, content, content_hash, change_summary, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		scriptID, latestVersion+1, content, contentHash, changeSummary, now,
+	)
+	if err != nil {
+		return fmt.Errorf("插入版本记录失败: %w", err)
+	}
+
+	// 版本保留策略：超过50个版本则删除最早的
+	if err := cleanupOldVersions(scriptID); err != nil {
+		fmt.Printf("清理旧版本失败: %v\n", err)
+	}
+
+	return nil
+}
+
+// cleanupOldVersions 清理旧版本，保留最近50个
+func cleanupOldVersions(scriptID int64) error {
+	_, err := database.DB.Exec(
+		"DELETE FROM script_versions WHERE script_id = ? AND id IN (SELECT id FROM script_versions WHERE script_id = ? ORDER BY version_number DESC LIMIT -1 OFFSET 50)",
+		scriptID, scriptID,
+	)
+	if err != nil {
+		return fmt.Errorf("删除旧版本失败: %w", err)
+	}
+	return nil
+}
+
+// GetScriptVersions 获取脚本版本列表（不包含content字段）
+func GetScriptVersions(scriptID int64) ([]model.ScriptVersion, error) {
+	// 检查脚本是否存在
+	_, err := GetScript(scriptID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := database.DB.Query(
+		"SELECT id, script_id, version_number, content_hash, change_summary, created_at FROM script_versions WHERE script_id = ? ORDER BY version_number DESC",
+		scriptID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("查询版本列表失败: %w", err)
+	}
+	defer rows.Close()
+
+	var versions []model.ScriptVersion
+	for rows.Next() {
+		var v model.ScriptVersion
+		err := rows.Scan(&v.ID, &v.ScriptID, &v.VersionNumber, &v.ContentHash, &v.ChangeSummary, &v.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("扫描版本数据失败: %w", err)
+		}
+		versions = append(versions, v)
+	}
+
+	return versions, nil
+}
+
+// GetScriptVersionContent 获取指定版本的完整内容
+func GetScriptVersionContent(scriptID, versionID int64) (*model.ScriptVersion, error) {
+	// 检查脚本是否存在
+	_, err := GetScript(scriptID)
+	if err != nil {
+		return nil, err
+	}
+
+	var v model.ScriptVersion
+	err = database.DB.QueryRow(
+		"SELECT id, script_id, version_number, content, content_hash, change_summary, created_at FROM script_versions WHERE id = ? AND script_id = ?",
+		versionID, scriptID,
+	).Scan(&v.ID, &v.ScriptID, &v.VersionNumber, &v.Content, &v.ContentHash, &v.ChangeSummary, &v.CreatedAt)
+
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("版本不存在")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("查询版本内容失败: %w", err)
+	}
+
+	return &v, nil
+}
+
+// RestoreScriptVersion 回滚到指定版本
+func RestoreScriptVersion(scriptID, versionID int64) error {
+	// 获取指定版本的内容
+	version, err := GetScriptVersionContent(scriptID, versionID)
+	if err != nil {
+		return err
+	}
+
+	// 保存内容（会自动创建新版本）
+	changeSummary := fmt.Sprintf("从版本 %d 回滚", version.VersionNumber)
+	if err := SaveScriptContent(scriptID, version.Content); err != nil {
+		return fmt.Errorf("保存回滚内容失败: %w", err)
+	}
+
+	// 更新新版本的change_summary为回滚标记
+	// 由于SaveScriptContent已经创建了版本，我们需要更新最新版本的change_summary
+	_, err = database.DB.Exec(
+		"UPDATE script_versions SET change_summary = ? WHERE script_id = ? ORDER BY version_number DESC LIMIT 1",
+		changeSummary, scriptID,
+	)
+	if err != nil {
+		// 更新失败不影响主流程
+		fmt.Printf("更新回滚版本描述失败: %v\n", err)
 	}
 
 	return nil

@@ -9,8 +9,17 @@ JMeter Admin 是一个轻量级的 JMeter 分布式压测管理平台，采用 *
 ### 核心功能
 
 - **JMX 脚本管理** — 支持上传、可视化树形编辑、XML 源码编辑双模式
+- **脚本版本管理** — 自动保存编辑历史，SHA256 去重，支持版本预览和一键回滚
 - **Slave 节点管理** — 自动心跳检测、一键连通性检查
+- **Agent 节点服务** — 轻量级辅助服务，提供文件分发和系统监控能力
+- **CSV 自动拆分分发** — 大文件流式拆分，按 Slave 数量均匀分发，执行后自动清理
 - **分布式压测执行** — 支持单机模式与分布式模式
+- **执行对比与基准线** — 多执行并行对比，标记基准线，自动计算指标差异百分比
+- **实时监控增强** — P95/P99 响应时间分位数、实时错误趋势、网络吞吐量
+- **错误分析增强** — 响应码分布饼图、错误时间线、Top 10 错误消息
+- **Slave 系统监控** — 实时采集 CPU/内存/磁盘/网络，阈值告警，资源详情弹窗
+- **JMX 编辑器增强** — 快捷添加工具栏、键盘快捷键、多选批量操作、全部展开/折叠
+- **进程管理** — 进程组管理、僵尸进程自动清理、执行超时保护（默认4小时）
 - **执行记录管理** — 实时日志流、错误分析、结果导出（JTL/报告/CSV）
 - **Master IP 自动检测** — 多网卡环境自动识别或手动配置
 
@@ -77,46 +86,69 @@ make build-linux
 
 ```yaml
 server:
-  port: 8080                    # HTTP 服务端口
+  port: 8080
 
 jmeter:
-  path: "jmeter"               # JMeter 可执行文件路径
-  master_hostname: ""          # Master IP（多网卡必填，可页面配置）
+  path: "jmeter"
+  master_hostname: ""
+  agent_csv_data_dir: "/opt/jmeter/csv-data"
+
+slave:
+  heartbeat_interval: 30
 
 dirs:
-  data: "./data"               # 数据库目录
-  uploads: "./uploads"         # 上传目录
-  results: "./results"         # 结果目录
+  data: "./data"
+  uploads: "./uploads"
+  results: "./results"
 ```
+
+配置项说明：
+
+| 配置项 | 说明 |
+|--------|------|
+| `server.port` | HTTP 服务端口 |
+| `jmeter.path` | JMeter 可执行文件路径 |
+| `jmeter.master_hostname` | Master IP（多网卡必填，可页面配置） |
+| `jmeter.agent_csv_data_dir` | Agent CSV 文件存放目录 |
+| `slave.heartbeat_interval` | Slave 心跳检测间隔（秒） |
+| `dirs.data` | 数据库目录 |
+| `dirs.uploads` | 上传目录 |
+| `dirs.results` | 结果目录 |
 
 ## 项目结构
 
 ```
 jmeter-admin/
 ├── main.go                     # 后端入口
+├── cmd/agent/main.go           # Agent 入口
 ├── config.yaml                 # 配置文件
 ├── Makefile                    # 构建命令
 ├── deploy.sh                   # 一键部署脚本
 ├── config/                     # 配置管理
 │   └── config.go
 ├── internal/                   # 后端核心
+│   ├── agent/                  # Agent 服务
+│   │   └── server.go
 │   ├── database/               # 数据库初始化
+│   │   └── db.go
 │   ├── handler/                # API 处理器
 │   ├── model/                  # 数据模型
 │   ├── router/                 # 路由注册
 │   └── service/                # 业务逻辑
+│       ├── agent_client.go     # Agent 客户端
+│       └── csv_split.go        # CSV 拆分逻辑
 ├── web/                        # 前端项目
 │   ├── src/
 │   │   ├── api/                # API 调用封装
-│   │   ├── components/         # 组件（JmxTreeEditor, ExecuteDialog）
+│   │   ├── components/         # 组件
 │   │   ├── views/              # 页面
-│   │   ├── utils/              # 工具（jmxParser）
+│   │   ├── utils/              # 工具
 │   │   └── router/             # 前端路由
 │   ├── vite.config.js
 │   └── package.json
-├── data/                       # SQLite 数据库（运行时生成）
-├── uploads/                    # 上传文件（运行时生成）
-└── results/                    # 执行结果（运行时生成）
+├── data/                       # SQLite 数据库
+├── uploads/                    # 上传文件
+└── results/                    # 执行结果
 ```
 
 ## API 文档
@@ -135,6 +167,14 @@ jmeter-admin/
 | PUT | /:id/content | 保存 JMX 内容 |
 | POST | /:id/files | 上传附件 |
 | DELETE | /:id/files/:fileId | 删除附件 |
+
+### 脚本版本管理 `/api/scripts/:id/versions`
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | / | 获取版本历史列表 |
+| GET | /:versionId | 获取历史版本内容 |
+| POST | /:versionId/restore | 恢复到指定版本 |
 
 ### Slave 管理 `/api/slaves`
 
@@ -158,7 +198,11 @@ jmeter-admin/
 | DELETE | /:id | 删除执行 |
 | POST | /:id/stop | 停止执行 |
 | GET | /:id/log | 实时日志（SSE） |
-| GET | /:id/errors | 错误分析 |
+| GET | /:id/live-metrics | 实时监控指标（含 P95/P99） |
+| PUT | /:id/baseline | 设置/取消基准线 |
+| GET | /compare | 多执行对比 |
+| GET | /:id/errors | 错误分析（响应码分布/时间线/Top10） |
+| POST | /:id/error-details/upload | 上传错误详情 |
 | GET | /:id/download/jtl | 下载 JTL |
 | GET | /:id/download/report | 下载报告 |
 | GET | /:id/download/errors | 导出错误 CSV |
@@ -204,9 +248,13 @@ jmeter-admin/
 | id | INTEGER | 主键 |
 | name | TEXT | 节点名称 |
 | host | TEXT | 主机地址 |
-| port | INTEGER | 端口 |
+| port | INTEGER | JMeter RMI 端口 |
+| agent_port | INTEGER | Agent 端口 |
+| agent_token | TEXT | Agent 鉴权 Token |
 | status | TEXT | 状态（online/offline） |
 | last_check_time | TEXT | 最后检测时间 |
+| system_stats | TEXT | Agent 系统资源 JSON |
+| agent_uptime | INTEGER | Agent 运行秒数 |
 | created_at | TEXT | 创建时间 |
 
 ### executions — 执行记录表
@@ -226,7 +274,124 @@ jmeter-admin/
 | report_path | TEXT | 报告目录路径 |
 | summary_data | TEXT | 汇总数据（JSON） |
 | log_path | TEXT | 日志文件路径 |
+| is_baseline | INTEGER | 是否为基准线（0/1） |
 | created_at | TEXT | 创建时间 |
+
+### script_versions — 脚本版本表
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 主键 |
+| script_id | INTEGER | 关联脚本 ID |
+| content_hash | TEXT | 内容哈希（SHA256） |
+| content | TEXT | JMX 内容 |
+| created_at | DATETIME | 创建时间 |
+
+## Agent 节点服务
+
+Agent 是轻量级辅助服务，运行在每台 JMeter Slave 节点上，为 Master 提供：
+- CSV 数据文件的远程分发和清理
+- 节点系统资源实时监控（CPU/内存/磁盘/网络）
+- 健康检查和连通性诊断
+
+### Agent 编译
+
+```bash
+# 在项目根目录
+go build -o jmeter-agent ./cmd/agent/
+
+# 或交叉编译 Linux 版本
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o jmeter-agent ./cmd/agent/
+```
+
+注意：Agent 依赖 gopsutil 进行系统监控，编译需要 CGO 支持（gcc）。
+
+### Agent 部署步骤
+
+**1. 前置依赖**
+- Go 1.21+（仅编译时需要）
+- gcc（CGO 编译需要）
+- JMeter 5.6+（Slave 节点本身需要运行 jmeter-server）
+- Java 11+
+
+**2. 部署方式一：直接复制二进制**
+```bash
+# 在 Master 机器上编译
+go build -o jmeter-agent ./cmd/agent/
+
+# 复制到 Slave 机器
+scp jmeter-agent user@slave-host:/opt/jmeter/
+
+# 在 Slave 上启动
+ssh user@slave-host
+cd /opt/jmeter
+mkdir -p csv-data
+./jmeter-agent -port 8089 -data-dir ./csv-data
+```
+
+**3. 部署方式二：使用 deploy.sh 编译**
+```bash
+# deploy.sh install 会同时编译 jmeter-admin（Master）和 jmeter-agent（Agent）两个二进制
+./deploy.sh install
+# 编译产物：./jmeter-admin 和 ./jmeter-agent
+```
+
+### Agent 启动参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `-port` | 8089 | Agent HTTP 监听端口 |
+| `-data-dir` | ./csv-data | CSV 文件存放目录 |
+| `-token` | (空) | 鉴权 token，为空则不校验 |
+
+### Agent 启动示例
+
+```bash
+# 基本启动
+./jmeter-agent -port 8089 -data-dir /opt/jmeter/csv-data
+
+# 启用 token 鉴权
+./jmeter-agent -port 8089 -data-dir /opt/jmeter/csv-data -token "your-secret-token"
+
+# 后台运行
+nohup ./jmeter-agent -port 8089 -data-dir /opt/jmeter/csv-data > agent.log 2>&1 &
+```
+
+### Agent API 端点
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| GET | `/health` | 否 | 健康检查 + 系统资源监控 |
+| POST | `/api/files/upload` | 是 | 上传文件（CSV 等） |
+| DELETE | `/api/files/{filename}` | 是 | 删除单个文件 |
+| DELETE | `/api/files/batch` | 是 | 批量删除文件 |
+
+### Agent /health 响应示例
+
+```json
+{
+  "status": "ok",
+  "version": "1.0.0",
+  "data_dir": "/opt/jmeter/csv-data",
+  "uptime_seconds": 3600,
+  "sys_stats": {
+    "cpu": {"percent": 45.5, "count": 8},
+    "memory": {"total_mb": 16384, "used_mb": 8192, "percent": 50.0},
+    "disk": {"total_mb": 1048576, "used_mb": 524288, "percent": 50.0},
+    "network": {"connections": 42}
+  }
+}
+```
+
+### Agent + Master 联动配置
+
+在 Master 的 Slave 管理页面中添加 Slave 时，需要填写：
+- **主机地址**: Slave 的 IP
+- **JMeter RMI 端口**: 默认 1099（jmeter-server 端口）
+- **Agent 端口**: 默认 8089
+- **Agent Token**: 如果 Agent 启用了 token 鉴权
+
+Master 会通过心跳检测（默认 30 秒）自动检测 Agent 连通性和采集系统资源。
 
 ## 分布式压测配置
 
@@ -237,12 +402,14 @@ jmeter-admin/
 
 ### Slave 节点配置
 
-1. 在页面「节点管理」中添加 Slave，填写 `host:port`
+1. 在页面「节点管理」中添加 Slave，填写主机地址、JMeter RMI 端口、Agent 端口
 2. Slave 端启动 jmeter-server：
 
 ```bash
 jmeter-server -Dserver.rmi.ssl.disable=true
 ```
+
+3. 启动 Agent 服务（参考上文 Agent 部署步骤）
 
 ### 多网卡环境注意事项
 
@@ -309,6 +476,17 @@ npm config set registry https://registry.npmmirror.com
 rm -f data/jmeter-admin.db
 ./jmeter-admin
 ```
+
+## JMX 编辑器快捷键
+
+| 快捷键 | 功能 |
+|--------|------|
+| Delete / Backspace | 删除选中节点 |
+| Ctrl+D | 复制节点 |
+| Ctrl+Shift+E | 启用/禁用节点 |
+| Ctrl+↑ | 上移节点 |
+| Ctrl+↓ | 下移节点 |
+| Ctrl+Click | 多选节点 |
 
 ## License
 

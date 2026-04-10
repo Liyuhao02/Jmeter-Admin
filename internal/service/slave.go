@@ -2,10 +2,17 @@ package service
 
 import (
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
+	"os"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"jmeter-admin/internal/database"
@@ -14,7 +21,7 @@ import (
 
 // ListSlaves 查询所有slave列表
 func ListSlaves() ([]model.Slave, error) {
-	rows, err := database.DB.Query("SELECT id, name, host, port, status, last_check_time, created_at FROM slaves ORDER BY id DESC")
+	rows, err := database.DB.Query("SELECT id, name, host, port, status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, agent_uptime, created_at FROM slaves ORDER BY id DESC")
 	if err != nil {
 		return nil, fmt.Errorf("查询slave列表失败: %w", err)
 	}
@@ -24,11 +31,19 @@ func ListSlaves() ([]model.Slave, error) {
 	for rows.Next() {
 		var slave model.Slave
 		var lastCheckTime sql.NullString
-		if err := rows.Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &lastCheckTime, &slave.CreatedAt); err != nil {
+		var agentCheckTime sql.NullString
+		var systemStats sql.NullString
+		if err := rows.Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &slave.AgentUptime, &slave.CreatedAt); err != nil {
 			return nil, fmt.Errorf("扫描slave数据失败: %w", err)
 		}
 		if lastCheckTime.Valid {
 			slave.LastCheckTime = lastCheckTime.String
+		}
+		if agentCheckTime.Valid {
+			slave.AgentCheckTime = agentCheckTime.String
+		}
+		if systemStats.Valid {
+			slave.SystemStats = systemStats.String
 		}
 		slaves = append(slaves, slave)
 	}
@@ -41,11 +56,11 @@ func ListSlaves() ([]model.Slave, error) {
 }
 
 // CreateSlave 创建slave
-func CreateSlave(name, host string, port int) (*model.Slave, error) {
+func CreateSlave(name, host string, port int, agentPort int, agentToken string) (*model.Slave, error) {
 	now := time.Now().Format("2006-01-02 15:04:05")
 	result, err := database.DB.Exec(
-		"INSERT INTO slaves (name, host, port, status, created_at) VALUES (?, ?, ?, ?, ?)",
-		name, host, port, "offline", now,
+		"INSERT INTO slaves (name, host, port, status, agent_port, agent_token, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		name, host, port, "offline", agentPort, agentToken, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("创建slave失败: %w", err)
@@ -57,22 +72,24 @@ func CreateSlave(name, host string, port int) (*model.Slave, error) {
 	}
 
 	slave := &model.Slave{
-		ID:        id,
-		Name:      name,
-		Host:      host,
-		Port:      port,
-		Status:    "offline",
-		CreatedAt: now,
+		ID:         id,
+		Name:       name,
+		Host:       host,
+		Port:       port,
+		Status:     "offline",
+		AgentPort:  agentPort,
+		AgentToken: agentToken,
+		CreatedAt:  now,
 	}
 
 	return slave, nil
 }
 
 // UpdateSlave 更新slave
-func UpdateSlave(id int64, name, host string, port int) error {
+func UpdateSlave(id int64, name, host string, port int, agentPort int, agentToken string) error {
 	result, err := database.DB.Exec(
-		"UPDATE slaves SET name = ?, host = ?, port = ? WHERE id = ?",
-		name, host, port, id,
+		"UPDATE slaves SET name = ?, host = ?, port = ?, agent_port = ?, agent_token = ? WHERE id = ?",
+		name, host, port, agentPort, agentToken, id,
 	)
 	if err != nil {
 		return fmt.Errorf("更新slave失败: %w", err)
@@ -109,15 +126,17 @@ func DeleteSlave(id int64) error {
 	return nil
 }
 
-// CheckSlave 检测slave连通性
+// CheckSlave 检测slave连通性（JMeter RMI 端口）
 func CheckSlave(id int64) (bool, error) {
 	// 获取slave信息
 	var slave model.Slave
 	var lastCheckTime sql.NullString
+	var agentCheckTime sql.NullString
+	var systemStats sql.NullString
 	err := database.DB.QueryRow(
-		"SELECT id, name, host, port, status, last_check_time, created_at FROM slaves WHERE id = ?",
+		"SELECT id, name, host, port, status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, agent_uptime, created_at FROM slaves WHERE id = ?",
 		id,
-	).Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &lastCheckTime, &slave.CreatedAt)
+	).Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &slave.AgentUptime, &slave.CreatedAt)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -128,8 +147,14 @@ func CheckSlave(id int64) (bool, error) {
 	if lastCheckTime.Valid {
 		slave.LastCheckTime = lastCheckTime.String
 	}
+	if agentCheckTime.Valid {
+		slave.AgentCheckTime = agentCheckTime.String
+	}
+	if systemStats.Valid {
+		slave.SystemStats = systemStats.String
+	}
 
-	// 检测连通性
+	// 检测 JMeter RMI 连通性
 	address := fmt.Sprintf("%s:%d", slave.Host, slave.Port)
 	conn, err := net.DialTimeout("tcp", address, 3*time.Second)
 
@@ -154,6 +179,270 @@ func CheckSlave(id int64) (bool, error) {
 	}
 
 	return isOnline, nil
+}
+
+// DiagnosticResult 诊断结果结构体
+type DiagnosticResult struct {
+	JMeterOnline  bool   `json:"jmeter_online"`
+	AgentOnline   bool   `json:"agent_online"`
+	JMeterError   string `json:"jmeter_error,omitempty"` // "connection_refused" / "timeout" / "unknown"
+	AgentError    string `json:"agent_error,omitempty"`  // "connection_refused" / "timeout" / "auth_failed" / "unknown"
+	JMeterLatency int64  `json:"jmeter_latency_ms"`
+	AgentLatency  int64  `json:"agent_latency_ms"`
+	Suggestion    string `json:"suggestion,omitempty"`
+}
+
+// classifyNetworkError 分类网络错误类型
+func classifyNetworkError(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	// 检查是否为超时错误
+	if os.IsTimeout(err) {
+		return "timeout"
+	}
+
+	// 检查 net.Error 接口
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return "timeout"
+		}
+	}
+
+	// 检查 net.OpError
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if opErr.Timeout() {
+			return "timeout"
+		}
+		// 检查系统调用错误
+		if sysErr, ok := opErr.Err.(*os.SyscallError); ok {
+			if errors.Is(sysErr.Err, syscall.ECONNREFUSED) {
+				return "connection_refused"
+			}
+		}
+		// 直接检查错误字符串
+		if strings.Contains(opErr.Err.Error(), "connection refused") {
+			return "connection_refused"
+		}
+	}
+
+	// 检查错误字符串
+	errStr := err.Error()
+	if strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "ECONNREFUSED") ||
+		strings.Contains(errStr, "Connection refused") {
+		return "connection_refused"
+	}
+	if strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "Timeout") ||
+		strings.Contains(errStr, "deadline exceeded") ||
+		strings.Contains(errStr, "context deadline") {
+		return "timeout"
+	}
+
+	return "unknown"
+}
+
+// generateSuggestion 根据诊断结果生成建议
+func generateSuggestion(result *DiagnosticResult, slave *model.Slave) {
+	var suggestions []string
+
+	if !result.JMeterOnline {
+		switch result.JMeterError {
+		case "connection_refused":
+			suggestions = append(suggestions, fmt.Sprintf("JMeter RMI 端口 %d 未监听，请检查 jmeter-server 是否已启动", slave.Port))
+		case "timeout":
+			suggestions = append(suggestions, fmt.Sprintf("JMeter RMI 连接超时，请检查防火墙是否放行 %d 端口", slave.Port))
+		default:
+			suggestions = append(suggestions, fmt.Sprintf("JMeter RMI 连接异常，请检查 %s:%d 是否可达", slave.Host, slave.Port))
+		}
+	}
+
+	if !result.AgentOnline {
+		switch result.AgentError {
+		case "connection_refused":
+			suggestions = append(suggestions, fmt.Sprintf("Agent 服务未运行，请启动 jmeter-agent (端口 %d)", slave.AgentPort))
+		case "timeout":
+			suggestions = append(suggestions, fmt.Sprintf("Agent 连接超时，请检查防火墙是否放行 %d 端口", slave.AgentPort))
+		case "auth_failed":
+			suggestions = append(suggestions, "Agent 认证失败，请检查 Token 配置是否正确")
+		default:
+			suggestions = append(suggestions, fmt.Sprintf("Agent 连接异常，请检查 %s:%d 是否可达", slave.Host, slave.AgentPort))
+		}
+	}
+
+	if len(suggestions) == 0 {
+		result.Suggestion = ""
+	} else if len(suggestions) == 1 {
+		result.Suggestion = suggestions[0]
+	} else {
+		result.Suggestion = strings.Join(suggestions, "；")
+	}
+}
+
+// AgentHealthResult Agent 健康检测结果
+type AgentHealthResult struct {
+	Online      bool
+	ErrorType   string
+	Latency     int64
+	SystemStats string // JSON string
+	AgentUptime int64
+}
+
+// CheckSlaveAgent 检测 Slave Agent HTTP 服务连通性
+// 返回: AgentHealthResult, 错误
+func CheckSlaveAgent(slave *model.Slave) (*AgentHealthResult, error) {
+	result := &AgentHealthResult{
+		Online:      false,
+		ErrorType:   "",
+		Latency:     0,
+		SystemStats: "",
+		AgentUptime: 0,
+	}
+
+	if slave.AgentPort == 0 {
+		slave.AgentPort = 8089 // 默认端口
+	}
+
+	url := fmt.Sprintf("http://%s:%d/health", slave.Host, slave.AgentPort)
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		result.ErrorType = "unknown"
+		return result, err
+	}
+
+	// 如果配置了 token，添加到请求头
+	if slave.AgentToken != "" {
+		req.Header.Set("Authorization", "Bearer "+slave.AgentToken)
+	}
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	result.Latency = time.Since(start).Milliseconds()
+
+	if err != nil {
+		result.ErrorType = classifyNetworkError(err)
+		return result, err
+	}
+	defer resp.Body.Close()
+
+	// 检查认证失败
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		result.ErrorType = "auth_failed"
+		return result, fmt.Errorf("agent authentication failed: status %d", resp.StatusCode)
+	}
+
+	result.Online = resp.StatusCode == http.StatusOK
+
+	// 解析响应体中的 sys_stats 和 uptime_seconds
+	if result.Online {
+		var healthResp struct {
+			Status        string          `json:"status"`
+			Version       string          `json:"version"`
+			UptimeSeconds int64           `json:"uptime_seconds"`
+			SysStats      json.RawMessage `json:"sys_stats"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&healthResp); err == nil {
+			// 将 sys_stats 原样存储为 JSON 字符串
+			if len(healthResp.SysStats) > 0 {
+				result.SystemStats = string(healthResp.SysStats)
+			}
+			result.AgentUptime = healthResp.UptimeSeconds
+		}
+	} else {
+		// 读取并丢弃响应体
+		_, _ = io.Copy(io.Discard, resp.Body)
+	}
+
+	return result, nil
+}
+
+// CheckSlaveBoth 同时检测 JMeter RMI 和 Agent 状态
+// 返回: 诊断结果, error
+func CheckSlaveBoth(id int64) (DiagnosticResult, error) {
+	result := DiagnosticResult{
+		JMeterOnline:  false,
+		AgentOnline:   false,
+		JMeterLatency: 0,
+		AgentLatency:  0,
+	}
+
+	// 获取slave信息
+	var slave model.Slave
+	var lastCheckTime sql.NullString
+	var agentCheckTime sql.NullString
+	var systemStats sql.NullString
+	err := database.DB.QueryRow(
+		"SELECT id, name, host, port, status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, agent_uptime, created_at FROM slaves WHERE id = ?",
+		id,
+	).Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &slave.AgentUptime, &slave.CreatedAt)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return result, fmt.Errorf("slave不存在")
+		}
+		return result, fmt.Errorf("查询slave失败: %w", err)
+	}
+	if lastCheckTime.Valid {
+		slave.LastCheckTime = lastCheckTime.String
+	}
+	if agentCheckTime.Valid {
+		slave.AgentCheckTime = agentCheckTime.String
+	}
+	if systemStats.Valid {
+		slave.SystemStats = systemStats.String
+	}
+
+	// 检测 JMeter RMI 连通性
+	jmeterAddress := fmt.Sprintf("%s:%d", slave.Host, slave.Port)
+	start := time.Now()
+	jmeterConn, jmeterErr := net.DialTimeout("tcp", jmeterAddress, 3*time.Second)
+	result.JMeterLatency = time.Since(start).Milliseconds()
+
+	result.JMeterOnline = jmeterErr == nil
+	if result.JMeterOnline {
+		jmeterConn.Close()
+	} else {
+		result.JMeterError = classifyNetworkError(jmeterErr)
+	}
+
+	// 检测 Agent HTTP 连通性
+	agentResult, _ := CheckSlaveAgent(&slave)
+	result.AgentOnline = agentResult.Online
+	result.AgentError = agentResult.ErrorType
+	result.AgentLatency = agentResult.Latency
+
+	// 生成诊断建议
+	generateSuggestion(&result, &slave)
+
+	// 更新状态和最后检测时间
+	now := time.Now().Format("2006-01-02 15:04:05")
+	jmeterStatus := "offline"
+	if result.JMeterOnline {
+		jmeterStatus = "online"
+	}
+	agentStatus := "offline"
+	if result.AgentOnline {
+		agentStatus = "online"
+	}
+
+	_, err = database.DB.Exec(
+		"UPDATE slaves SET status = ?, agent_status = ?, last_check_time = ?, agent_check_time = ?, system_stats = ?, agent_uptime = ? WHERE id = ?",
+		jmeterStatus, agentStatus, now, now, agentResult.SystemStats, agentResult.AgentUptime, id,
+	)
+	if err != nil {
+		return result, fmt.Errorf("更新slave状态失败: %w", err)
+	}
+
+	return result, nil
 }
 
 // StartHeartbeat 启动定时心跳检测
@@ -187,31 +476,46 @@ func checkAllSlaves() {
 			defer wg.Done()
 			defer func() { <-semaphore }() // 释放信号量
 
-			// 检测连通性
+			// 检测 JMeter RMI 连通性
 			address := fmt.Sprintf("%s:%d", s.Host, s.Port)
 			conn, err := net.DialTimeout("tcp", address, 3*time.Second)
 
-			var isOnline bool
+			var jmeterOnline bool
 			if err != nil {
-				isOnline = false
+				jmeterOnline = false
 			} else {
-				isOnline = true
+				jmeterOnline = true
 				conn.Close()
 			}
 
+			// 检测 Agent HTTP 连通性
+			agentResult, _ := CheckSlaveAgent(&s)
+			agentOnline := agentResult.Online
+
 			// 更新状态和最后检测时间
-			status := "offline"
-			if isOnline {
-				status = "online"
+			jmeterStatus := "offline"
+			if jmeterOnline {
+				jmeterStatus = "online"
+			}
+			agentStatus := "offline"
+			if agentOnline {
+				agentStatus = "online"
 			}
 			now := time.Now().Format("2006-01-02 15:04:05")
 
-			_, dbErr := database.DB.Exec("UPDATE slaves SET status = ?, last_check_time = ? WHERE id = ?", status, now, s.ID)
+			_, dbErr := database.DB.Exec(
+				"UPDATE slaves SET status = ?, agent_status = ?, last_check_time = ?, agent_check_time = ?, system_stats = ?, agent_uptime = ? WHERE id = ?",
+				jmeterStatus, agentStatus, now, now, agentResult.SystemStats, agentResult.AgentUptime, s.ID,
+			)
 			if dbErr != nil {
 				log.Printf("心跳检测: 更新 Slave %s 状态失败: %v", s.Name, dbErr)
 			}
 
-			log.Printf("心跳检测: %s (%s:%d) - %s", s.Name, s.Host, s.Port, map[bool]string{true: "online", false: "offline"}[isOnline])
+			log.Printf("心跳检测: %s (%s:%d) JMeter: %s, Agent: %s",
+				s.Name, s.Host, s.Port,
+				map[bool]string{true: "online", false: "offline"}[jmeterOnline],
+				map[bool]string{true: "online", false: "offline"}[agentOnline],
+			)
 		}(slave)
 	}
 

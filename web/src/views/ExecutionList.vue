@@ -1,7 +1,7 @@
 <template>
   <div class="execution-list-page">
     <!-- 统计卡片区域 -->
-    <div class="stats-section">
+    <div class="stats-section" v-loading="statsLoading">
       <div class="stat-card" @click="filterByStatus('')">
         <div class="stat-icon total">
           <el-icon><Document /></el-icon>
@@ -117,6 +117,15 @@
           <div class="section-title">执行记录</div>
         </div>
         <div class="section-actions">
+          <el-button 
+            :disabled="selectedExecutions.length !== 2" 
+            type="primary" 
+            @click="openCompareDialog"
+            class="compare-btn"
+          >
+            <el-icon><TrendCharts /></el-icon>
+            对比 ({{ selectedExecutions.length }}/2)
+          </el-button>
           <div v-if="hasRunning" class="auto-refresh-indicator">
             <span class="refresh-dot"></span>
             <span class="refresh-text">自动刷新中</span>
@@ -130,11 +139,13 @@
 
       <!-- 执行记录表格 -->
       <el-table
-        v-loading="loading"
+        v-loading="tableLoading"
         :data="executionList"
         class="executions-table"
         stripe
+        @selection-change="handleSelectionChange"
       >
+        <el-table-column type="selection" width="45" align="center" />
         <el-table-column label="#" width="60" align="center">
           <template #default="{ $index }">
             <span class="index-text">{{ (pagination.page - 1) * pagination.page_size + $index + 1 }}</span>
@@ -259,13 +270,26 @@
                 <el-icon v-if="deletingId !== row.id"><Delete /></el-icon>
                 删除
               </el-button>
+              <el-button
+                v-if="row.status === 'success'"
+                link
+                :type="row.is_baseline ? 'warning' : 'default'"
+                @click="toggleBaseline(row)"
+                class="action-btn baseline-btn"
+              >
+                <el-icon>
+                  <StarFilled v-if="row.is_baseline" />
+                  <Star v-else />
+                </el-icon>
+                {{ row.is_baseline ? '取消基准' : '设为基准' }}
+              </el-button>
             </div>
           </template>
         </el-table-column>
       </el-table>
 
       <!-- 空状态 -->
-      <div v-if="!loading && executionList.length === 0" class="empty-state">
+      <div v-if="!tableLoading && executionList.length === 0" class="empty-state">
         <div class="empty-icon">
           <el-icon><DocumentDelete /></el-icon>
         </div>
@@ -286,12 +310,75 @@
         />
       </div>
     </div>
+
+    <!-- 对比弹窗 -->
+    <el-dialog 
+      v-model="compareDialogVisible" 
+      title="执行对比" 
+      width="720px"
+      class="compare-dialog"
+      destroy-on-close
+    >
+      <div class="compare-container" v-loading="compareLoading">
+        <template v-if="compareResult">
+          <!-- 顶部：两次执行的基本信息 -->
+          <div class="compare-header">
+            <div class="compare-col">
+              <div class="compare-title">执行 #{{ compareResult?.execution1?.id }}</div>
+              <div class="compare-info">{{ compareResult?.execution1?.start_time }}</div>
+              <el-tag v-if="compareResult?.execution1?.is_baseline" type="warning" size="small" class="baseline-tag">
+                <el-icon><StarFilled /></el-icon> 基准线
+              </el-tag>
+            </div>
+            <div class="compare-vs">VS</div>
+            <div class="compare-col">
+              <div class="compare-title">执行 #{{ compareResult?.execution2?.id }}</div>
+              <div class="compare-info">{{ compareResult?.execution2?.start_time }}</div>
+              <el-tag v-if="compareResult?.execution2?.is_baseline" type="warning" size="small" class="baseline-tag">
+                <el-icon><StarFilled /></el-icon> 基准线
+              </el-tag>
+            </div>
+          </div>
+          
+          <!-- 指标对比列表 -->
+          <div class="compare-metrics">
+            <div 
+              v-for="diff in compareResult?.differences" 
+              :key="diff.metric" 
+              class="metric-row"
+            >
+              <span class="metric-label">{{ diff.label }}</span>
+              <span class="metric-value">{{ formatMetricValue(diff.value1, diff.unit) }}</span>
+              <span 
+                class="metric-arrow" 
+                :class="{ improved: diff.improved, worsened: !diff.improved && diff.diff_pct !== 0 }"
+              >
+                <template v-if="diff.diff_pct > 0">
+                  <span class="arrow-up">↑</span> +{{ diff.diff_pct.toFixed(1) }}%
+                </template>
+                <template v-else-if="diff.diff_pct < 0">
+                  <span class="arrow-down">↓</span> {{ diff.diff_pct.toFixed(1) }}%
+                </template>
+                <template v-else>
+                  <span class="arrow-flat">—</span> 0%
+                </template>
+              </span>
+              <span class="metric-value">{{ formatMetricValue(diff.value2, diff.unit) }}</span>
+            </div>
+          </div>
+        </template>
+        <div v-else-if="!compareLoading" class="compare-empty">
+          <el-icon :size="48"><DocumentDelete /></el-icon>
+          <p>暂无对比数据</p>
+        </div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { 
   View, 
@@ -304,27 +391,36 @@ import {
   Loading,
   CircleCheck,
   VideoPause,
-  Delete
+  Delete,
+  Star,
+  StarFilled,
+  TrendCharts
 } from '@element-plus/icons-vue'
 import { executionApi } from '@/api/execution'
 import { scriptApi } from '@/api/script'
 import { formatDateTimeInShanghai, parseServerDateTime } from '@/utils/datetime'
 
 const router = useRouter()
-const loading = ref(false)
+const route = useRoute()
+const statsLoading = ref(false)
+const tableLoading = ref(false)
 const executionList = ref([])
 const stoppingId = ref(null)
 const deletingId = ref(null)
-const pagination = ref({
-  page: 1,
-  page_size: 10,
-  total: 0
-})
+
 const refreshTimer = ref(null)
 const clockTimer = ref(null)
 const nowTick = ref(Date.now())
 const liveMetricsMap = ref({})
 const LIST_REFRESH_INTERVAL = 3000
+
+// 选中的执行（用于对比）
+const selectedExecutions = ref([])
+
+// 对比弹窗相关
+const compareDialogVisible = ref(false)
+const compareLoading = ref(false)
+const compareResult = ref(null)
 
 // 统计数据
 const stats = ref({
@@ -335,19 +431,77 @@ const stats = ref({
   stopped: 0
 })
 
-// 筛选条件
-const scripts = ref([])
+// 从 URL 恢复筛选状态
 const filters = ref({
-  script_id: '',
-  status: '',
-  keyword: ''
+  script_id: route.query.script_id ? Number(route.query.script_id) : '',
+  status: route.query.status || '',
+  keyword: route.query.keyword || ''
 })
-const dateRange = ref([])
+const dateRange = ref([
+  route.query.start_date || '',
+  route.query.end_date || ''
+].filter(Boolean))
+const pagination = ref({
+  page: route.query.page ? Number(route.query.page) : 1,
+  page_size: route.query.page_size ? Number(route.query.page_size) : 10,
+  total: 0
+})
+
+// 脚本列表
+const scripts = ref([])
 
 // 计算是否有运行中的任务
 const hasRunning = computed(() => {
   return executionList.value.some(item => item.status === 'running')
 })
+
+// 处理表格选择变化
+const handleSelectionChange = (val) => {
+  selectedExecutions.value = val
+}
+
+// 切换基准线
+const toggleBaseline = async (row) => {
+  try {
+    const action = row.is_baseline ? 'unset' : 'set'
+    await executionApi.setBaseline(row.id, action)
+    ElMessage.success(row.is_baseline ? '已取消基准线' : '已设为基准线')
+    fetchExecutions()
+  } catch (err) {
+    console.error('基准线操作失败:', err)
+    ElMessage.error('操作失败')
+  }
+}
+
+// 打开对比弹窗
+const openCompareDialog = async () => {
+  if (selectedExecutions.value.length !== 2) {
+    ElMessage.warning('请选择两条执行进行对比')
+    return
+  }
+  compareDialogVisible.value = true
+  compareLoading.value = true
+  try {
+    const id1 = selectedExecutions.value[0].id
+    const id2 = selectedExecutions.value[1].id
+    const res = await executionApi.compareExecutions(id1, id2)
+    compareResult.value = res.data
+  } catch (err) {
+    console.error('对比失败:', err)
+    ElMessage.error('获取对比数据失败')
+  } finally {
+    compareLoading.value = false
+  }
+}
+
+// 格式化指标值
+const formatMetricValue = (value, unit) => {
+  if (value === null || value === undefined) return '-'
+  const n = parseFloat(value)
+  if (isNaN(n)) return '-'
+  if (Number.isInteger(n)) return `${n.toLocaleString()} ${unit || ''}`
+  return `${n.toFixed(2)} ${unit || ''}`
+}
 
 // 获取状态类型
 const getStatusType = (status) => {
@@ -503,11 +657,14 @@ const hydrateRunningMetrics = async (rows) => {
 
 // 获取执行统计
 const fetchStats = async () => {
+  statsLoading.value = true
   try {
     const res = await executionApi.getStats()
     stats.value = res.data || { total: 0, running: 0, completed: 0, failed: 0, stopped: 0 }
   } catch (error) {
     console.error('获取执行统计失败:', error)
+  } finally {
+    statsLoading.value = false
   }
 }
 
@@ -521,9 +678,24 @@ const fetchScripts = async () => {
   }
 }
 
+// 同步筛选条件到 URL
+const syncFiltersToURL = () => {
+  const query = {}
+  if (filters.value.script_id) query.script_id = filters.value.script_id
+  if (filters.value.status) query.status = filters.value.status
+  if (filters.value.keyword) query.keyword = filters.value.keyword
+  if (pagination.value.page > 1) query.page = pagination.value.page
+  if (pagination.value.page_size !== 10) query.page_size = pagination.value.page_size
+  if (dateRange.value && dateRange.value.length === 2) {
+    query.start_date = dateRange.value[0]
+    query.end_date = dateRange.value[1]
+  }
+  router.replace({ query })
+}
+
 // 获取执行列表
 const fetchExecutions = async () => {
-  loading.value = true
+  tableLoading.value = true
   try {
     const params = {
       page: pagination.value.page,
@@ -551,13 +723,14 @@ const fetchExecutions = async () => {
   } catch (error) {
     console.error('获取执行列表失败:', error)
   } finally {
-    loading.value = false
+    tableLoading.value = false
   }
 }
 
 // 搜索
 const handleSearch = () => {
   pagination.value.page = 1
+  syncFiltersToURL()
   fetchExecutions()
 }
 
@@ -570,6 +743,8 @@ const resetFilters = () => {
   }
   dateRange.value = []
   pagination.value.page = 1
+  pagination.value.page_size = 10
+  router.replace({ query: {} })
   fetchExecutions()
 }
 
@@ -577,6 +752,7 @@ const resetFilters = () => {
 const filterByStatus = (status) => {
   filters.value.status = status
   pagination.value.page = 1
+  syncFiltersToURL()
   fetchExecutions()
 }
 
@@ -584,12 +760,14 @@ const filterByStatus = (status) => {
 const handleSizeChange = (size) => {
   pagination.value.page_size = size
   pagination.value.page = 1
+  syncFiltersToURL()
   fetchExecutions()
 }
 
 // 处理页码变化
 const handlePageChange = (page) => {
   pagination.value.page = page
+  syncFiltersToURL()
   fetchExecutions()
 }
 
@@ -681,6 +859,20 @@ onMounted(() => {
   setupAutoRefresh()
   setupClockTicker()
 })
+
+// 监听 URL query 变化（从详情页返回时）
+watch(() => route.query, (newQuery) => {
+  filters.value.script_id = newQuery.script_id ? Number(newQuery.script_id) : ''
+  filters.value.status = newQuery.status || ''
+  filters.value.keyword = newQuery.keyword || ''
+  pagination.value.page = newQuery.page ? Number(newQuery.page) : 1
+  pagination.value.page_size = newQuery.page_size ? Number(newQuery.page_size) : 10
+  if (newQuery.start_date && newQuery.end_date) {
+    dateRange.value = [newQuery.start_date, newQuery.end_date]
+  } else {
+    dateRange.value = []
+  }
+}, { immediate: false })
 
 onUnmounted(() => {
   if (refreshTimer.value) {
@@ -1032,6 +1224,14 @@ onUnmounted(() => {
     .delete-btn:hover {
       color: #ff5c52 !important;
     }
+    
+    .baseline-btn {
+      color: #eab308;
+    }
+    
+    .baseline-btn:hover {
+      color: #facc15;
+    }
   }
 }
 
@@ -1114,5 +1314,168 @@ onUnmounted(() => {
   display: flex;
   justify-content: center;
   margin-top: 24px;
+}
+
+// 对比按钮
+.compare-btn {
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  border: none;
+  
+  &:hover:not(:disabled) {
+    background: linear-gradient(135deg, #4d8aff, #3b6fdb);
+  }
+  
+  &:disabled {
+    opacity: 0.6;
+    background: linear-gradient(135deg, #64748b, #475569);
+  }
+}
+
+// 对比弹窗样式
+.compare-dialog {
+  :deep(.el-dialog) {
+    background: var(--bg-card);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+  }
+  
+  :deep(.el-dialog__header) {
+    margin-right: 0;
+    padding: 20px 24px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    
+    .el-dialog__title {
+      color: var(--text-primary);
+      font-weight: 600;
+    }
+  }
+  
+  :deep(.el-dialog__body) {
+    padding: 24px;
+  }
+}
+
+.compare-container {
+  min-height: 200px;
+}
+
+.compare-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.compare-vs {
+  font-size: 18px;
+  font-weight: bold;
+  color: rgba(255, 255, 255, 0.5);
+  padding: 0 16px;
+}
+
+.compare-col {
+  text-align: center;
+  flex: 1;
+  
+  .compare-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.9);
+    margin-bottom: 6px;
+  }
+  
+  .compare-info {
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.5);
+    margin-bottom: 8px;
+  }
+  
+  .baseline-tag {
+    background: rgba(234, 179, 8, 0.15);
+    border-color: rgba(234, 179, 8, 0.3);
+    color: #eab308;
+  }
+}
+
+.compare-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.metric-row {
+  display: flex;
+  align-items: center;
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  
+  .metric-label {
+    flex: 0 0 120px;
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 14px;
+  }
+  
+  .metric-value {
+    flex: 1;
+    text-align: center;
+    color: rgba(255, 255, 255, 0.9);
+    font-weight: 500;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 15px;
+  }
+  
+  .metric-arrow {
+    flex: 0 0 100px;
+    text-align: center;
+    font-weight: 600;
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.5);
+    
+    .arrow-up {
+      color: #22c55e;
+    }
+    
+    .arrow-down {
+      color: #ef4444;
+    }
+    
+    .arrow-flat {
+      color: rgba(255, 255, 255, 0.3);
+    }
+    
+    &.improved {
+      color: #22c55e;
+    }
+    
+    &.worsened {
+      color: #ef4444;
+    }
+  }
+}
+
+.compare-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  color: rgba(255, 255, 255, 0.4);
+  
+  p {
+    margin-top: 12px;
+    font-size: 14px;
+  }
+}
+
+// 基准线行高亮
+:deep(.el-table__row.baseline-row) {
+  background: rgba(234, 179, 8, 0.06) !important;
+  
+  td:first-child {
+    border-left: 3px solid #eab308;
+  }
 }
 </style>

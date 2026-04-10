@@ -73,5 +73,15 @@ export const executionApi = {
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
+  },
+
+  // 设置/取消基准线
+  setBaseline(id, action = 'set') {
+    return request.put(`/api/executions/${id}/baseline`, { action })
+  },
+
+  // 对比两次执行
+  compareExecutions(id1, id2) {
+    return request.get('/api/executions/compare', { params: { id1, id2 } })
   }
 }

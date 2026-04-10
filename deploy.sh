@@ -87,7 +87,16 @@ install() {
         exit 1
     fi
     
+    # 构建 Agent
+    log_info "构建 jmeter-agent..."
+    CGO_ENABLED=1 go build -o jmeter-agent ./cmd/agent/
+    if [ $? -ne 0 ]; then
+        log_error "Agent 构建失败"
+        exit 1
+    fi
+    
     log_info "编译完成: $APP_DIR/$APP_NAME"
+    log_info "编译完成: $APP_DIR/jmeter-agent"
     log_info "启动服务: ./deploy.sh start"
 }
 

@@ -3,22 +3,26 @@ package service
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
-	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"jmeter-admin/config"
@@ -47,9 +51,33 @@ func isRequestSample(url string) bool {
 // 全局进程管理器，用于存储正在执行的命令
 type executionProcessGroup struct {
 	Commands []*exec.Cmd
+	Cancel   context.CancelFunc
 }
 
 var executionProcesses sync.Map
+
+// setProcessGroup 设置进程组属性（仅在 Unix 系统上）
+func setProcessGroup(cmd *exec.Cmd) {
+	if runtime.GOOS != "windows" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
+}
+
+// killProcessGroup 杀死进程组（仅在 Unix 系统上），返回是否成功
+func killProcessGroup(cmd *exec.Cmd) bool {
+	if runtime.GOOS == "windows" || cmd.Process == nil {
+		return false
+	}
+	pgid, err := syscall.Getpgid(cmd.Process.Pid)
+	if err != nil {
+		return false
+	}
+	// 负号表示杀进程组
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		return false
+	}
+	return true
+}
 
 // calcJVMArgs 动态计算 JVM 内存参数，取系统可用内存的 80%
 func calcJVMArgs() string {
@@ -101,7 +129,7 @@ func calcJVMArgs() string {
 }
 
 // CreateExecution 创建并启动执行
-func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPDetails bool, includeMaster bool) (*model.Execution, error) {
+func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPDetails bool, includeMaster bool, splitCSV bool) (*model.Execution, error) {
 	// 1. 查询脚本信息
 	var script model.Script
 	var scriptFilePath string
@@ -119,6 +147,7 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 	// 2. 查询选中的 slave 信息
 	slaveHosts := []string{}
 	var offlineSlaveIDs []int64 // 离线的 slave ID 列表
+	slaves := []model.Slave{}   // 存储完整的 slave 信息
 	if len(slaveIDs) > 0 {
 		placeholders := make([]string, len(slaveIDs))
 		queryArgs := make([]interface{}, len(slaveIDs))
@@ -127,7 +156,7 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 			queryArgs[i] = id
 		}
 		query := fmt.Sprintf(
-			"SELECT id, host, port FROM slaves WHERE id IN (%s) AND status = 'online'",
+			"SELECT id, host, port, agent_port, agent_token FROM slaves WHERE id IN (%s) AND status = 'online'",
 			strings.Join(placeholders, ","),
 		)
 		rows, err := database.DB.Query(query, queryArgs...)
@@ -138,15 +167,14 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 
 		onlineIDs := make(map[int64]bool)
 		for rows.Next() {
-			var sid int64
-			var host string
-			var port int
-			if err := rows.Scan(&sid, &host, &port); err != nil {
+			var slave model.Slave
+			if err := rows.Scan(&slave.ID, &slave.Host, &slave.Port, &slave.AgentPort, &slave.AgentToken); err != nil {
 				fmt.Printf("[警告] 扫描 Slave 数据失败: %v\n", err)
 				continue
 			}
-			onlineIDs[sid] = true
-			slaveHosts = append(slaveHosts, fmt.Sprintf("%s:%d", host, port))
+			onlineIDs[slave.ID] = true
+			slaveHosts = append(slaveHosts, fmt.Sprintf("%s:%d", slave.Host, slave.Port))
+			slaves = append(slaves, slave)
 		}
 
 		// 检查哪些 slave 离线
@@ -207,9 +235,145 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 	fmt.Printf("[执行 #%d] save_http_details=%t\n", execID, saveHTTPDetails)
 	runDistributedWithLocal := len(slaveHosts) > 0 && includeMaster
 	fmt.Printf("[执行 #%d] include_master=%t\n", execID, includeMaster)
+
+	// === CSV 拆分分发（仅分布式 + 开启 split_csv 时） ===
+	if splitCSV && len(slaves) > 0 {
+		// 读取 JMX 文件内容
+		jmxContent, err := os.ReadFile(scriptFilePath)
+		if err != nil {
+			fmt.Printf("[警告] 读取JMX文件失败: %v\n", err)
+		} else {
+			// 解析提取所有 CSVDataSet 的 filename
+			csvFiles := extractCSVDataSetFiles(string(jmxContent))
+
+			if len(csvFiles) > 0 {
+				fmt.Printf("[执行 #%d] 发现CSV文件: %v\n", execID, csvFiles)
+
+				// 确定分片数
+				partCount := len(slaves)
+				if includeMaster {
+					partCount++
+				}
+
+				scriptDir := filepath.Dir(scriptFilePath)
+				csvDataDir := config.GlobalConfig.JMeter.AgentCSVDataDir
+				localCSVDir := filepath.Join(resultDir, "csv-data")
+				os.MkdirAll(localCSVDir, 0755)
+
+				// 用于清理的文件列表
+				var allPartFiles []string
+				var csvFileNames []string
+
+				// 拆分每个 CSV 文件
+				for _, csvFile := range csvFiles {
+					csvFileName := filepath.Base(csvFile)
+					csvFileNames = append(csvFileNames, csvFileName)
+
+					// 确定原始CSV路径
+					var originalPath string
+					if filepath.IsAbs(csvFile) {
+						originalPath = csvFile
+					} else {
+						originalPath = filepath.Join(scriptDir, csvFile)
+					}
+
+					// 检查文件是否存在
+					if _, err := os.Stat(originalPath); os.IsNotExist(err) {
+						fmt.Printf("[警告] CSV文件不存在: %s\n", originalPath)
+						continue
+					}
+
+					// 拆分CSV文件
+					parts, err := SplitCSV(originalPath, partCount, true, resultDir, csvFileName)
+					if err != nil {
+						fmt.Printf("[警告] 拆分CSV文件失败 %s: %v\n", csvFileName, err)
+						continue
+					}
+					allPartFiles = append(allPartFiles, parts...)
+					fmt.Printf("[执行 #%d] CSV %s 已拆分为 %d 份\n", execID, csvFileName, len(parts))
+
+					// 按序号分发到各 Slave
+					for i, slave := range slaves {
+						if i < len(parts) {
+							client := NewAgentClient(slave.Host, slave.AgentPort, slave.AgentToken)
+							if err := client.UploadFile(parts[i], csvFileName); err != nil {
+								fmt.Printf("[警告] 上传CSV到Slave %s失败: %v\n", slave.Host, err)
+							} else {
+								fmt.Printf("[执行 #%d] 已上传 %s 到 Slave %s\n", execID, csvFileName, slave.Host)
+							}
+						}
+					}
+
+					// 如果 includeMaster，最后一个 part 复制到本地
+					if includeMaster && len(parts) > len(slaves) {
+						masterPart := parts[len(slaves)]
+						localPath := filepath.Join(localCSVDir, csvFileName)
+						if err := copyFile(masterPart, localPath); err != nil {
+							fmt.Printf("[警告] 复制CSV到本地失败 %s: %v\n", csvFileName, err)
+						} else {
+							fmt.Printf("[执行 #%d] 已复制 %s 到本地\n", execID, csvFileName)
+						}
+						allPartFiles = append(allPartFiles, localPath)
+					}
+				}
+
+				// 生成运行时 JMX（替换 CSVDataSet filename）
+				if len(csvFileNames) > 0 {
+					runtimeJMXPath := filepath.Join(resultDir, "runtime.jmx")
+					modifiedContent := replaceCSVDataSetPaths(string(jmxContent), csvDataDir)
+					if err := os.WriteFile(runtimeJMXPath, []byte(modifiedContent), 0644); err != nil {
+						fmt.Printf("[警告] 写入运行时JMX失败: %v\n", err)
+					} else {
+						runScriptPath = runtimeJMXPath
+						fmt.Printf("[执行 #%d] 已生成运行时JMX: %s\n", execID, runtimeJMXPath)
+					}
+				}
+
+				// 注册清理回调（在 goroutine 末尾异步调用）
+				go func(execID int64, slaves []model.Slave, csvFiles []string) {
+					// 等待执行完成
+					for {
+						var status string
+						if err := database.DB.QueryRow(
+							"SELECT status FROM executions WHERE id = ?", execID,
+						).Scan(&status); err != nil {
+							fmt.Printf("[警告] 查询执行 #%d 状态失败: %v\n", execID, err)
+							time.Sleep(2 * time.Second)
+							continue // 查询失败时继续重试，不要退出循环
+						}
+						if status != "running" {
+							break
+						}
+						time.Sleep(2 * time.Second)
+					}
+
+					// 清理 Slave 上的 CSV 文件
+					for _, slave := range slaves {
+						client := NewAgentClient(slave.Host, slave.AgentPort, slave.AgentToken)
+						for _, csvFile := range csvFiles {
+							if err := client.DeleteFile(csvFile); err != nil {
+								fmt.Printf("[警告] 清理Slave %s上的CSV失败 %s: %v\n", slave.Host, csvFile, err)
+							}
+						}
+					}
+
+					// 清理本地临时文件
+					for _, partFile := range allPartFiles {
+						os.Remove(partFile)
+					}
+					os.RemoveAll(localCSVDir)
+
+					fmt.Printf("[执行 #%d] CSV分发清理完成\n", execID)
+				}(execID, slaves, csvFileNames)
+			}
+		}
+	}
+
 	if saveHTTPDetails {
-		runtimeScriptPath := filepath.Join(resultDir, "runtime.jmx")
-		if err := createRuntimeJMXWithErrorDetailListener(scriptFilePath, runtimeScriptPath); err != nil {
+		// 使用当前准备好的运行脚本作为源（可能已包含 CSV 分片路径修改）
+		sourceScript := runScriptPath
+		runtimeScriptPath := filepath.Join(resultDir, "runtime_with_details.jmx")
+		if err := createRuntimeJMXWithErrorDetailListener(sourceScript, runtimeScriptPath); err != nil {
 			return nil, fmt.Errorf("生成带错误明细监听器的运行脚本失败: %w", err)
 		}
 		runScriptPath = runtimeScriptPath
@@ -240,36 +404,36 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 		jmeterPath = "jmeter"
 	}
 
-		// 使用属性文件 + CLI 属性双保险，尽量确保本地和分布式节点都写出请求/响应详情字段。
-		saveServiceProps := map[string]string{
-			"jmeter.save.saveservice.output_format":                     "csv",
-			"jmeter.save.saveservice.print_field_names":                "true",
-			"jmeter.save.saveservice.request_headers":                  "true",
-			"jmeter.save.saveservice.response_data":                    "true",
-			"jmeter.save.saveservice.response_data.on_error":           "true",
-			"jmeter.save.saveservice.response_headers":                 "true",
-			"jmeter.save.saveservice.samplerData":                      "true",
-			"jmeter.save.saveservice.url":                              "true",
-			"jmeter.save.saveservice.encoding":                         "true",
-			"jmeter.save.saveservice.sent_bytes":                       "true",
-			"jmeter.save.saveservice.latency":                          "true",
-			"jmeter.save.saveservice.connect_time":                     "true",
-			"jmeter.save.saveservice.assertion_results_failure_message": "true",
-		}
-		propKeys := make([]string, 0, len(saveServiceProps))
-		for key := range saveServiceProps {
-			propKeys = append(propKeys, key)
-		}
-		sort.Strings(propKeys)
-		propLines := []string{"# JMeter 结果保存配置 - 由 jmeter-admin 自动生成"}
-		for _, key := range propKeys {
-			propLines = append(propLines, fmt.Sprintf("%s=%s", key, saveServiceProps[key]))
-		}
-		propsContent := strings.Join(propLines, "\n") + "\n"
-		propsFile := filepath.Join(resultDir, "jmeter.properties")
-		if err := os.WriteFile(propsFile, []byte(propsContent), 0644); err != nil {
-			fmt.Printf("[警告] 创建临时属性文件失败: %v\n", err)
-		}
+	// 使用属性文件 + CLI 属性双保险，尽量确保本地和分布式节点都写出请求/响应详情字段。
+	saveServiceProps := map[string]string{
+		"jmeter.save.saveservice.output_format":                     "csv",
+		"jmeter.save.saveservice.print_field_names":                 "true",
+		"jmeter.save.saveservice.request_headers":                   "true",
+		"jmeter.save.saveservice.response_data":                     "true",
+		"jmeter.save.saveservice.response_data.on_error":            "true",
+		"jmeter.save.saveservice.response_headers":                  "true",
+		"jmeter.save.saveservice.samplerData":                       "true",
+		"jmeter.save.saveservice.url":                               "true",
+		"jmeter.save.saveservice.encoding":                          "true",
+		"jmeter.save.saveservice.sent_bytes":                        "true",
+		"jmeter.save.saveservice.latency":                           "true",
+		"jmeter.save.saveservice.connect_time":                      "true",
+		"jmeter.save.saveservice.assertion_results_failure_message": "true",
+	}
+	propKeys := make([]string, 0, len(saveServiceProps))
+	for key := range saveServiceProps {
+		propKeys = append(propKeys, key)
+	}
+	sort.Strings(propKeys)
+	propLines := []string{"# JMeter 结果保存配置 - 由 jmeter-admin 自动生成"}
+	for _, key := range propKeys {
+		propLines = append(propLines, fmt.Sprintf("%s=%s", key, saveServiceProps[key]))
+	}
+	propsContent := strings.Join(propLines, "\n") + "\n"
+	propsFile := filepath.Join(resultDir, "jmeter.properties")
+	if err := os.WriteFile(propsFile, []byte(propsContent), 0644); err != nil {
+		fmt.Printf("[警告] 创建临时属性文件失败: %v\n", err)
+	}
 
 	buildBaseArgs := func(targetResultPath string, generateReport bool) []string {
 		args := []string{
@@ -365,21 +529,27 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 	}
 	fmt.Printf("[执行 #%d] JVM_ARGS: %s\n", execID, jvmArgs)
 
-	// 6. 启动 goroutine 异步执行
+	// 6. 启动 goroutine 异步执行（带 4 小时超时保护）
 	go func() {
-		processGroup := &executionProcessGroup{}
+		// 创建带超时的 context
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
+		defer cancel()
+
+		processGroup := &executionProcessGroup{Cancel: cancel}
 		commands := make([]*exec.Cmd, 0, 2)
 		logPrefix := fmt.Sprintf("[执行 #%d]", execID)
 		if len(localArgs) > 0 {
 			fmt.Printf("%s 本地命令: %s %s\n", logPrefix, jmeterPath, strings.Join(localArgs, " "))
-			cmd := exec.Command(jmeterPath, localArgs...)
+			cmd := exec.CommandContext(ctx, jmeterPath, localArgs...)
 			cmd.Env = append(os.Environ(), "JVM_ARGS="+jvmArgs)
+			setProcessGroup(cmd)
 			commands = append(commands, cmd)
 		}
 		if len(remoteArgs) > 0 {
 			fmt.Printf("%s 分布式命令: %s %s\n", logPrefix, jmeterPath, strings.Join(remoteArgs, " "))
-			cmd := exec.Command(jmeterPath, remoteArgs...)
+			cmd := exec.CommandContext(ctx, jmeterPath, remoteArgs...)
 			cmd.Env = append(os.Environ(), "JVM_ARGS="+jvmArgs)
+			setProcessGroup(cmd)
 			commands = append(commands, cmd)
 		}
 		processGroup.Commands = commands
@@ -394,56 +564,91 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 		}
 		defer logFile.Close()
 
+		// 用于检测超时的 channel
+		done := make(chan struct{})
+		var execErr error
+
 		runCommand := func(cmd *exec.Cmd) error {
 			cmd.Stdout = logFile
 			cmd.Stderr = logFile
 			return cmd.Run()
 		}
 
-		var localErr error
-		var remoteErr error
-		switch len(commands) {
-		case 0:
-			err = fmt.Errorf("未生成可执行的 JMeter 命令")
-		case 1:
-			err = runCommand(commands[0])
-		default:
-			var wg sync.WaitGroup
-			wg.Add(2)
-			go func() {
-				defer wg.Done()
-				localErr = runCommand(commands[0])
-			}()
-			go func() {
-				defer wg.Done()
-				remoteErr = runCommand(commands[1])
-			}()
-			wg.Wait()
-			if mergeErr := mergeJTLFiles([]string{localResultPath, remoteResultPath}, resultPath); mergeErr != nil {
-				fmt.Fprintf(logFile, "[执行 #%d] 合并本地与分布式结果失败: %v\n", execID, mergeErr)
-				if err == nil {
-					err = mergeErr
+		// 在单独的 goroutine 中执行命令
+		go func() {
+			defer close(done)
+
+			var localErr error
+			var remoteErr error
+			switch len(commands) {
+			case 0:
+				execErr = fmt.Errorf("未生成可执行的 JMeter 命令")
+			case 1:
+				execErr = runCommand(commands[0])
+			default:
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					localErr = runCommand(commands[0])
+				}()
+				go func() {
+					defer wg.Done()
+					remoteErr = runCommand(commands[1])
+				}()
+				wg.Wait()
+				if mergeErr := mergeJTLFiles([]string{localResultPath, remoteResultPath}, resultPath); mergeErr != nil {
+					fmt.Fprintf(logFile, "[执行 #%d] 合并本地与分布式结果失败: %v\n", execID, mergeErr)
+					if execErr == nil {
+						execErr = mergeErr
+					}
+				} else {
+					reportArgs := []string{"-g", resultPath, "-o", reportPath}
+					reportCmd := exec.Command(jmeterPath, reportArgs...)
+					reportCmd.Env = append(os.Environ(), "JVM_ARGS="+jvmArgs)
+					setProcessGroup(reportCmd)
+					reportCmd.Stdout = logFile
+					reportCmd.Stderr = logFile
+					if reportErr := reportCmd.Run(); reportErr != nil {
+						fmt.Fprintf(logFile, "[执行 #%d] 生成合并报告失败: %v\n", execID, reportErr)
+					}
 				}
-			} else {
-				reportArgs := []string{"-g", resultPath, "-o", reportPath}
-				reportCmd := exec.Command(jmeterPath, reportArgs...)
-				reportCmd.Env = append(os.Environ(), "JVM_ARGS="+jvmArgs)
-				reportCmd.Stdout = logFile
-				reportCmd.Stderr = logFile
-				if reportErr := reportCmd.Run(); reportErr != nil {
-					fmt.Fprintf(logFile, "[执行 #%d] 生成合并报告失败: %v\n", execID, reportErr)
+				if localErr != nil || remoteErr != nil {
+					errMessages := make([]string, 0, 2)
+					if localErr != nil {
+						errMessages = append(errMessages, "本地执行失败: "+localErr.Error())
+					}
+					if remoteErr != nil {
+						errMessages = append(errMessages, "分布式执行失败: "+remoteErr.Error())
+					}
+					execErr = fmt.Errorf("%s", strings.Join(errMessages, "; "))
 				}
 			}
-			if localErr != nil || remoteErr != nil {
-				errMessages := make([]string, 0, 2)
-				if localErr != nil {
-					errMessages = append(errMessages, "本地执行失败: "+localErr.Error())
+		}()
+
+		// 等待命令完成或超时
+		select {
+		case <-done:
+			// 正常完成
+			err = execErr
+		case <-ctx.Done():
+			// 超时或被取消
+			if ctx.Err() == context.DeadlineExceeded {
+				fmt.Fprintf(logFile, "[执行 #%d] 执行超时（超过4小时），强制终止\n", execID)
+				// 强制杀死进程组
+				for _, cmd := range commands {
+					killProcessGroup(cmd)
 				}
-				if remoteErr != nil {
-					errMessages = append(errMessages, "分布式执行失败: "+remoteErr.Error())
-				}
-				err = fmt.Errorf("%s", strings.Join(errMessages, "; "))
+				// 更新状态为 timeout
+				endTime := time.Now().Format("2006-01-02 15:04:05")
+				_, _ = database.DB.Exec(
+					"UPDATE executions SET status = ?, end_time = ?, remarks = ? WHERE id = ?",
+					"timeout", endTime, "执行超时（超过4小时）", execID,
+				)
+				return
 			}
+			// 被取消（手动停止）
+			err = fmt.Errorf("执行被取消")
 		}
 
 		// 7. 命令完成后解析结果
@@ -553,7 +758,7 @@ func ListExecutionsFiltered(page, pageSize int, scriptID, status, keyword, start
 	}
 
 	// 查询列表
-	query := `SELECT id, script_id, script_name, slave_ids, status, start_time, end_time, duration, remarks, result_path, report_path, summary_data, log_path, created_at FROM executions ` + whereClause + ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	query := `SELECT id, script_id, script_name, slave_ids, status, start_time, end_time, duration, remarks, result_path, report_path, summary_data, log_path, is_baseline, created_at FROM executions ` + whereClause + ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	args = append(args, pageSize, offset)
 
 	rows, err := database.DB.Query(query, args...)
@@ -567,10 +772,11 @@ func ListExecutionsFiltered(page, pageSize int, scriptID, status, keyword, start
 		var e model.Execution
 		var endTime, summaryData, remarks sql.NullString
 		var duration sql.NullInt64
+		var isBaseline int
 		err := rows.Scan(
 			&e.ID, &e.ScriptID, &e.ScriptName, &e.SlaveIDs, &e.Status,
 			&e.StartTime, &endTime, &duration, &remarks, &e.ResultPath, &e.ReportPath,
-			&summaryData, &e.LogPath, &e.CreatedAt,
+			&summaryData, &e.LogPath, &isBaseline, &e.CreatedAt,
 		)
 		if err != nil {
 			continue
@@ -587,6 +793,7 @@ func ListExecutionsFiltered(page, pageSize int, scriptID, status, keyword, start
 		if summaryData.Valid {
 			e.SummaryData = summaryData.String
 		}
+		e.IsBaseline = isBaseline == 1
 		executions = append(executions, e)
 	}
 
@@ -639,13 +846,14 @@ func GetExecution(id int64) (*model.Execution, error) {
 	var e model.Execution
 	var endTime, summaryData, remarks sql.NullString
 	var duration sql.NullInt64
+	var isBaseline int
 	err := database.DB.QueryRow(
-		"SELECT id, script_id, script_name, slave_ids, status, start_time, end_time, duration, remarks, result_path, report_path, summary_data, log_path, created_at FROM executions WHERE id = ?",
+		"SELECT id, script_id, script_name, slave_ids, status, start_time, end_time, duration, remarks, result_path, report_path, summary_data, log_path, is_baseline, created_at FROM executions WHERE id = ?",
 		id,
 	).Scan(
 		&e.ID, &e.ScriptID, &e.ScriptName, &e.SlaveIDs, &e.Status,
 		&e.StartTime, &endTime, &duration, &remarks, &e.ResultPath, &e.ReportPath,
-		&summaryData, &e.LogPath, &e.CreatedAt,
+		&summaryData, &e.LogPath, &isBaseline, &e.CreatedAt,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -666,6 +874,7 @@ func GetExecution(id int64) (*model.Execution, error) {
 	if summaryData.Valid {
 		e.SummaryData = summaryData.String
 	}
+	e.IsBaseline = isBaseline == 1
 
 	return &e, nil
 }
@@ -748,6 +957,14 @@ func GetExecutionLiveMetrics(id int64) (*LiveExecutionMetrics, error) {
 			totalRequests++
 			bucket.Count++
 			bucket.TotalRTMs += elapsed
+			// 收集响应时间用于百分位数计算
+			bucket.ElapsedMs = append(bucket.ElapsedMs, float64(elapsed))
+			// 收集字节数（如果 JTL 中有 bytes 字段）
+			if bytesStr := getField(record, "bytes"); bytesStr != "" {
+				if bytesVal, parseErr := strconv.ParseInt(bytesStr, 10, 64); parseErr == nil {
+					bucket.TotalBytes += bytesVal
+				}
+			}
 			if success {
 				successRequests++
 				bucket.Success++
@@ -881,6 +1098,20 @@ func GetExecutionLiveMetrics(id int64) (*LiveExecutionMetrics, error) {
 		currentRequestRate = requestRate
 		currentRT = avgRT
 		currentConcurrency = bucket.MaxConcurrency
+
+		// 计算 P95/P99 百分位数
+		p95RT := calculatePercentile(bucket.ElapsedMs, 95)
+		p99RT := calculatePercentile(bucket.ElapsedMs, 99)
+
+		// 计算每秒字节数（时间窗口为1秒，所以直接取 TotalBytes）
+		bytesPerSec := float64(bucket.TotalBytes)
+
+		// 获取当前时间窗口的错误数
+		errorCount := bucket.Error
+		if totalRequests <= 0 && bucket.TransactionCount > 0 {
+			errorCount = bucket.TransactionError
+		}
+
 		points = append(points, LiveMetricPoint{
 			Timestamp:     time.Unix(sec, 0).Format("15:04:05"),
 			EpochSecond:   sec,
@@ -891,6 +1122,10 @@ func GetExecutionLiveMetrics(id int64) (*LiveExecutionMetrics, error) {
 			ErrorRate:     errorRate,
 			Concurrency:   bucket.MaxConcurrency,
 			TotalRequests: cumulativeRequests,
+			P95RT:         p95RT,
+			P99RT:         p99RT,
+			ErrorCount:    errorCount,
+			BytesPerSec:   bytesPerSec,
 		})
 	}
 
@@ -959,11 +1194,20 @@ func StopExecution(id int64) error {
 		return fmt.Errorf("进程信息无效")
 	}
 
-	// 杀死进程
+	// 调用 cancel 取消 context（用于超时机制）
+	if processGroup.Cancel != nil {
+		processGroup.Cancel()
+	}
+
+	// 杀死进程组（优先）或单个进程
 	for _, cmd := range processGroup.Commands {
 		if cmd != nil && cmd.Process != nil {
-			if err := cmd.Process.Kill(); err != nil {
-				return fmt.Errorf("停止进程失败: %w", err)
+			// 先尝试杀死整个进程组
+			if !killProcessGroup(cmd) {
+				// 回退到只杀主进程
+				if err := cmd.Process.Kill(); err != nil {
+					return fmt.Errorf("停止进程失败: %w", err)
+				}
 			}
 		}
 	}
@@ -1040,6 +1284,35 @@ func GetExecutionLog(id int64) (string, error) {
 	return string(content), nil
 }
 
+// cleanOrphanedJMeterProcesses 清理残留的 JMeter 进程（服务启动时调用）
+// 仅在 Linux/macOS 下执行
+func cleanOrphanedJMeterProcesses() {
+	if runtime.GOOS == "windows" {
+		return
+	}
+
+	// 使用 pgrep 查找残留的 JMeter 进程
+	output, err := exec.Command("pgrep", "-f", "ApacheJMeter").Output()
+	if err != nil {
+		// pgrep 返回非零退出码表示没有找到进程，这是正常情况
+		return
+	}
+
+	pids := strings.TrimSpace(string(output))
+	if pids == "" {
+		return
+	}
+
+	fmt.Printf("发现残留的 JMeter 进程，正在清理...\n")
+
+	// 使用 pkill 强制清理残留的 JMeter 进程
+	if err := exec.Command("pkill", "-9", "-f", "ApacheJMeter").Run(); err != nil {
+		fmt.Printf("清理残留 JMeter 进程失败: %v\n", err)
+	} else {
+		fmt.Printf("已清理残留的 JMeter 进程\n")
+	}
+}
+
 // CleanupStaleExecutions 清理陈旧的执行记录（服务启动时调用）
 // 将所有 status='running' 的记录更新为 'failed'
 func CleanupStaleExecutions() error {
@@ -1055,6 +1328,9 @@ func CleanupStaleExecutions() error {
 	if affected > 0 {
 		fmt.Printf("已清理 %d 条未完成的执行记录\n", affected)
 	}
+
+	// 清理残留的 JMeter 进程
+	cleanOrphanedJMeterProcesses()
 
 	return nil
 }
@@ -1552,22 +1828,46 @@ type ErrorType struct {
 	SampleErrors    []ErrorRecord `json:"sample_errors"` // 每种类型保留最多5条样例
 }
 
+// CodeCount 响应码分布
+type CodeCount struct {
+	Code       string  `json:"code"`
+	Count      int     `json:"count"`
+	Percentage float64 `json:"percentage"`
+}
+
+// TimelinePoint 错误时间线点
+type TimelinePoint struct {
+	Minute      string  `json:"minute"` // "15:04" 格式
+	ErrorCount  int     `json:"error_count"`
+	SampleCount int     `json:"sample_count"`
+	ErrorRate   float64 `json:"error_rate"`
+}
+
+// MessageCount Top 错误信息
+type MessageCount struct {
+	Message string `json:"message"`
+	Count   int    `json:"count"`
+}
+
 // ErrorAnalysis 错误分析结果
 type ErrorAnalysis struct {
-	TotalErrors            int             `json:"total_errors"`
-	TotalSamples           int             `json:"total_samples"`
-	ErrorRate              float64         `json:"error_rate"`
-	ErrorTypes             []ErrorType     `json:"error_types"`
-	Records                []ErrorRecord   `json:"records"`                 // 按类型各最多10000条
-	Truncated              bool            `json:"truncated"`               // 是否被截断
-	TypeTruncated          map[string]bool `json:"type_truncated"`          // 哪些错误类型被截断
-	DetailFieldsAvailable  bool            `json:"detail_fields_available"` // 是否记录了请求/响应详情字段
-	DetailStorageHint      string          `json:"detail_storage_hint"`     // 当前结果文件的详情保存说明
-	AvailableDetailFields  []string        `json:"available_detail_fields"` // 实际可用的详情列
-	ExpectedDetailSources  []string        `json:"expected_detail_sources"`
-	ReceivedDetailSources  []string        `json:"received_detail_sources"`
-	MissingDetailSources   []string        `json:"missing_detail_sources"`
-	DetailUploadWarning    string          `json:"detail_upload_warning"`
+	TotalErrors              int             `json:"total_errors"`
+	TotalSamples             int             `json:"total_samples"`
+	ErrorRate                float64         `json:"error_rate"`
+	ErrorTypes               []ErrorType     `json:"error_types"`
+	Records                  []ErrorRecord   `json:"records"`                 // 按类型各最多10000条
+	Truncated                bool            `json:"truncated"`               // 是否被截断
+	TypeTruncated            map[string]bool `json:"type_truncated"`          // 哪些错误类型被截断
+	DetailFieldsAvailable    bool            `json:"detail_fields_available"` // 是否记录了请求/响应详情字段
+	DetailStorageHint        string          `json:"detail_storage_hint"`     // 当前结果文件的详情保存说明
+	AvailableDetailFields    []string        `json:"available_detail_fields"` // 实际可用的详情列
+	ExpectedDetailSources    []string        `json:"expected_detail_sources"`
+	ReceivedDetailSources    []string        `json:"received_detail_sources"`
+	MissingDetailSources     []string        `json:"missing_detail_sources"`
+	DetailUploadWarning      string          `json:"detail_upload_warning"`
+	ResponseCodeDistribution []CodeCount     `json:"response_code_distribution"`
+	ErrorTimeline            []TimelinePoint `json:"error_timeline"`
+	TopErrorMessages         []MessageCount  `json:"top_error_messages"`
 }
 
 type LiveMetricPoint struct {
@@ -1580,6 +1880,10 @@ type LiveMetricPoint struct {
 	ErrorRate     float64 `json:"error_rate"`
 	Concurrency   int     `json:"concurrency"`
 	TotalRequests int     `json:"total_requests"`
+	P95RT         float64 `json:"p95_rt"`        // P95 响应时间
+	P99RT         float64 `json:"p99_rt"`        // P99 响应时间
+	ErrorCount    int     `json:"error_count"`   // 当前时间窗口内的错误数
+	BytesPerSec   float64 `json:"bytes_per_sec"` // 每秒传输字节数
 }
 
 type LiveExecutionMetrics struct {
@@ -1613,6 +1917,28 @@ type liveBucket struct {
 	TransactionSuccess int
 	TransactionError   int
 	TransactionRTMs    int64
+	ElapsedMs          []float64 // 存储该时间窗口内所有请求的响应时间，用于计算百分位数
+	TotalBytes         int64     // 该时间窗口内的总字节数
+}
+
+// calculatePercentile 计算百分位数（使用简单排序法）
+func calculatePercentile(values []float64, percentile float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	// 复制切片以避免修改原始数据
+	sorted := make([]float64, len(values))
+	copy(sorted, values)
+	sort.Float64s(sorted)
+	index := percentile / 100.0 * float64(len(sorted)-1)
+	lower := int(math.Floor(index))
+	upper := int(math.Ceil(index))
+	if lower == upper || upper >= len(sorted) {
+		return sorted[lower]
+	}
+	// 线性插值
+	fraction := index - float64(lower)
+	return sorted[lower] + fraction*(sorted[upper]-sorted[lower])
 }
 
 type errorDetailEntry struct {
@@ -2115,6 +2441,28 @@ func sourceMatchesExpected(expected, received string) bool {
 	return false
 }
 
+// truncateToMinute 将时间戳字符串截取到分钟级别（格式: "15:04"）
+// 支持 epoch 毫秒数和日期时间字符串两种格式
+func truncateToMinute(timestampStr string) string {
+	if timestampStr == "" {
+		return "unknown"
+	}
+	// 尝试解析为 epoch 毫秒
+	if ms, err := strconv.ParseInt(timestampStr, 10, 64); err == nil {
+		t := time.Unix(ms/1000, 0)
+		return t.Format("15:04")
+	}
+	// 尝试解析为日期时间字符串（带毫秒）
+	if t, err := time.Parse("2006-01-02 15:04:05.000", timestampStr); err == nil {
+		return t.Format("15:04")
+	}
+	// 尝试解析为日期时间字符串（不带毫秒）
+	if t, err := time.Parse("2006-01-02 15:04:05", timestampStr); err == nil {
+		return t.Format("15:04")
+	}
+	return "unknown"
+}
+
 func buildEmptyErrorAnalysis(execution *model.Execution, hint string) *ErrorAnalysis {
 	expectedDetailSources := getExecutionExpectedDetailSources(execution)
 	return &ErrorAnalysis{
@@ -2276,6 +2624,12 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 	// 记录哪些类型被截断
 	typeTruncated := make(map[string]bool)
 
+	// 新增收集变量
+	codeCountMap := make(map[string]int)           // responseCode → count
+	timelineMap := make(map[string]*TimelinePoint) // "HH:MM" → point
+	messageCounts := make(map[string]int)          // failureMessage → count
+	totalSamplesByMinute := make(map[string]int)   // 每分钟总样本数
+
 	getField := func(record []string, field string) string {
 		if idx, ok := colIndex[strings.TrimSpace(field)]; ok && idx < len(record) {
 			return strings.TrimSpace(record[idx])
@@ -2319,6 +2673,13 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 
 		totalSamples++
 
+		// 收集时间戳用于时间线统计
+		tsStr := getField(record, "timeStamp")
+		minute := truncateToMinute(tsStr)
+		if minute != "unknown" {
+			totalSamplesByMinute[minute]++
+		}
+
 		success := getField(record, "success")
 		if strings.ToLower(success) != "false" {
 			continue
@@ -2329,7 +2690,22 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 			fmt.Printf("[JTL] 警告: JTL 文件不包含请求/响应详情字段，错误详情将部分缺失。可用列: %v\n", headers)
 		}
 
+		// 收集错误统计数据
+		codeCountMap[responseCode]++
+		if minute != "unknown" {
+			if point, ok := timelineMap[minute]; ok {
+				point.ErrorCount++
+			} else {
+				timelineMap[minute] = &TimelinePoint{
+					Minute:     minute,
+					ErrorCount: 1,
+				}
+			}
+		}
 		failureMessage := getField(record, "failureMessage")
+		if failureMessage != "" {
+			messageCounts[failureMessage]++
+		}
 		responseData := getFirstField(record, "responseData.onError", "responseData", "response_data")
 		responseHeaders := getFirstField(record, "responseHeaders", "response_headers")
 		threadName := getField(record, "threadName")
@@ -2348,7 +2724,6 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 		latency, _ := strconv.ParseInt(latencyStr, 10, 64)
 		connectTime, _ := strconv.ParseInt(connectStr, 10, 64)
 
-		tsStr := getField(record, "timeStamp")
 		detailKey := buildErrorDetailKey(tsStr, label, threadName, elapsed, url)
 		detailSource := ""
 		if matches := detailEntries[detailKey]; len(matches) > 0 {
@@ -2456,21 +2831,73 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 		errorRate = float64(totalErrors) * 100.0 / float64(totalSamples)
 	}
 
+	// 构建响应码分布统计
+	responseCodeDistribution := make([]CodeCount, 0, len(codeCountMap))
+	for code, count := range codeCountMap {
+		percentage := 0.0
+		if totalErrors > 0 {
+			percentage = float64(count) * 100.0 / float64(totalErrors)
+		}
+		responseCodeDistribution = append(responseCodeDistribution, CodeCount{
+			Code:       code,
+			Count:      count,
+			Percentage: percentage,
+		})
+	}
+	// 按 count 降序排序
+	sort.Slice(responseCodeDistribution, func(i, j int) bool {
+		return responseCodeDistribution[i].Count > responseCodeDistribution[j].Count
+	})
+
+	// 构建错误时间线统计
+	errorTimeline := make([]TimelinePoint, 0, len(timelineMap))
+	for minute, point := range timelineMap {
+		point.SampleCount = totalSamplesByMinute[minute]
+		if point.SampleCount > 0 {
+			point.ErrorRate = float64(point.ErrorCount) * 100.0 / float64(point.SampleCount)
+		}
+		errorTimeline = append(errorTimeline, *point)
+	}
+	// 按时间排序
+	sort.Slice(errorTimeline, func(i, j int) bool {
+		return errorTimeline[i].Minute < errorTimeline[j].Minute
+	})
+
+	// 构建 Top 错误信息统计
+	topErrorMessages := make([]MessageCount, 0, len(messageCounts))
+	for msg, count := range messageCounts {
+		topErrorMessages = append(topErrorMessages, MessageCount{
+			Message: msg,
+			Count:   count,
+		})
+	}
+	// 按 count 降序排序
+	sort.Slice(topErrorMessages, func(i, j int) bool {
+		return topErrorMessages[i].Count > topErrorMessages[j].Count
+	})
+	// 只保留前 10 条
+	if len(topErrorMessages) > 10 {
+		topErrorMessages = topErrorMessages[:10]
+	}
+
 	return &ErrorAnalysis{
-		TotalErrors:           totalErrors,
-		TotalSamples:          totalSamples,
-		ErrorRate:             errorRate,
-		ErrorTypes:            errorTypes,
-		Records:               records,
-		Truncated:             len(typeTruncated) > 0,
-		TypeTruncated:         typeTruncated,
-		DetailFieldsAvailable: detailFieldsAvailable,
-		DetailStorageHint:     detailStorageHint,
-		AvailableDetailFields: availableDetailFields,
-		ExpectedDetailSources: expectedDetailSources,
-		ReceivedDetailSources: receivedDetailSources,
-		MissingDetailSources:  missingDetailSources,
-		DetailUploadWarning:   detailUploadWarning,
+		TotalErrors:              totalErrors,
+		TotalSamples:             totalSamples,
+		ErrorRate:                errorRate,
+		ErrorTypes:               errorTypes,
+		Records:                  records,
+		Truncated:                len(typeTruncated) > 0,
+		TypeTruncated:            typeTruncated,
+		DetailFieldsAvailable:    detailFieldsAvailable,
+		DetailStorageHint:        detailStorageHint,
+		AvailableDetailFields:    availableDetailFields,
+		ExpectedDetailSources:    expectedDetailSources,
+		ReceivedDetailSources:    receivedDetailSources,
+		MissingDetailSources:     missingDetailSources,
+		DetailUploadWarning:      detailUploadWarning,
+		ResponseCodeDistribution: responseCodeDistribution,
+		ErrorTimeline:            errorTimeline,
+		TopErrorMessages:         topErrorMessages,
 	}, nil
 }
 
@@ -2542,4 +2969,335 @@ func StreamExecutionLog(id int64, writer io.Writer, stopChan chan struct{}) erro
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
+}
+
+// extractCSVDataSetFiles 从 JMX 内容中提取 CSVDataSet 的 filename
+func extractCSVDataSetFiles(jmxContent string) []string {
+	// 使用正则提取: <stringProp name="filename">(.*?)</stringProp>
+	// 在 CSVDataSet 元素中
+	var csvFiles []string
+	seen := make(map[string]bool)
+
+	// 查找所有 CSVDataSet 元素
+	csvDataSetPattern := `<CSVDataSet[^>]*>[\s\S]*?<\/CSVDataSet>`
+	re := regexp.MustCompile(csvDataSetPattern)
+	matches := re.FindAllString(jmxContent, -1)
+
+	filenamePattern := `<stringProp name="filename">(.*?)<\/stringProp>`
+	filenameRe := regexp.MustCompile(filenamePattern)
+
+	for _, match := range matches {
+		filenameMatches := filenameRe.FindStringSubmatch(match)
+		if len(filenameMatches) > 1 {
+			filename := filenameMatches[1]
+			if filename != "" && !seen[filename] {
+				seen[filename] = true
+				csvFiles = append(csvFiles, filename)
+			}
+		}
+	}
+
+	return csvFiles
+}
+
+// replaceCSVDataSetPaths 替换 JMX 中 CSVDataSet 的 filename 路径和 shareMode
+func replaceCSVDataSetPaths(jmxContent string, csvDataDir string) string {
+	// 找到所有 <stringProp name="filename">xxx</stringProp>
+	// 将 xxx 替换为 csvDataDir + "/" + filepath.Base(xxx)
+	filenamePattern := `<stringProp name="filename">(.*?)<\/stringProp>`
+	re := regexp.MustCompile(filenamePattern)
+
+	result := re.ReplaceAllStringFunc(jmxContent, func(match string) string {
+		submatches := re.FindStringSubmatch(match)
+		if len(submatches) > 1 {
+			oldPath := submatches[1]
+			if oldPath != "" {
+				newPath := csvDataDir + "/" + filepath.Base(oldPath)
+				return `<stringProp name="filename">` + newPath + `</stringProp>`
+			}
+		}
+		return match
+	})
+
+	// 替换 shareMode 为 shareMode.all，确保拆分后每个 Slave 上的所有线程共享同一分片文件
+	shareModePattern := `<stringProp name="shareMode">shareMode\.\w+</stringProp>`
+	shareRe := regexp.MustCompile(shareModePattern)
+	result = shareRe.ReplaceAllString(result, `<stringProp name="shareMode">shareMode.all</stringProp>`)
+
+	return result
+}
+
+// copyFile 复制文件
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	if err != nil {
+		return err
+	}
+
+	return destFile.Sync()
+}
+
+// ExecutionSummary 执行摘要（用于对比）
+type ExecutionSummary struct {
+	ID           int64   `json:"id"`
+	ScriptName   string  `json:"script_name"`
+	Status       string  `json:"status"`
+	StartTime    string  `json:"start_time"`
+	Duration     int64   `json:"duration"`
+	TotalSamples int64   `json:"total_samples"`
+	AvgRT        float64 `json:"avg_rt"`
+	TPS          float64 `json:"tps"`
+	ErrorRate    float64 `json:"error_rate"`
+	P90RT        float64 `json:"p90_rt"`
+	P95RT        float64 `json:"p95_rt"`
+	P99RT        float64 `json:"p99_rt"`
+	IsBaseline   bool    `json:"is_baseline"`
+}
+
+// MetricDiff 指标差异
+type MetricDiff struct {
+	Metric   string  `json:"metric"` // "avg_rt", "tps", "error_rate" 等
+	Label    string  `json:"label"`  // 中文标签
+	Value1   float64 `json:"value1"`
+	Value2   float64 `json:"value2"`
+	DiffPct  float64 `json:"diff_pct"` // 变化百分比
+	Improved bool    `json:"improved"` // 是否改善
+	Unit     string  `json:"unit"`     // 单位
+}
+
+// ComparisonResult 对比结果
+type ComparisonResult struct {
+	Execution1  ExecutionSummary `json:"execution1"`
+	Execution2  ExecutionSummary `json:"execution2"`
+	Differences []MetricDiff     `json:"differences"`
+}
+
+// SetBaseline 设置基准线
+func SetBaseline(executionID int64) error {
+	// 查询该执行记录，获取 script_id
+	var scriptID int64
+	err := database.DB.QueryRow("SELECT script_id FROM executions WHERE id = ?", executionID).Scan(&scriptID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("执行记录不存在")
+		}
+		return fmt.Errorf("查询执行记录失败: %w", err)
+	}
+
+	// 使用事务保证原子性
+	tx, err := database.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 将该 script_id 下所有执行的 is_baseline 置为 0
+	_, err = tx.Exec("UPDATE executions SET is_baseline = 0 WHERE script_id = ?", scriptID)
+	if err != nil {
+		return fmt.Errorf("重置基准线失败: %w", err)
+	}
+
+	// 将该执行的 is_baseline 置为 1
+	_, err = tx.Exec("UPDATE executions SET is_baseline = 1 WHERE id = ?", executionID)
+	if err != nil {
+		return fmt.Errorf("设置基准线失败: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// UnsetBaseline 取消基准线
+func UnsetBaseline(executionID int64) error {
+	_, err := database.DB.Exec("UPDATE executions SET is_baseline = 0 WHERE id = ?", executionID)
+	if err != nil {
+		return fmt.Errorf("取消基准线失败: %w", err)
+	}
+	return nil
+}
+
+// CompareExecutions 对比两次执行
+func CompareExecutions(id1, id2 int64) (*ComparisonResult, error) {
+	// 查询两个执行记录
+	exec1, err := GetExecution(id1)
+	if err != nil {
+		return nil, fmt.Errorf("获取执行记录1失败: %w", err)
+	}
+	exec2, err := GetExecution(id2)
+	if err != nil {
+		return nil, fmt.Errorf("获取执行记录2失败: %w", err)
+	}
+
+	// 解析 summary_data
+	var summary1, summary2 map[string]interface{}
+	if exec1.SummaryData != "" {
+		json.Unmarshal([]byte(exec1.SummaryData), &summary1)
+	}
+	if exec2.SummaryData != "" {
+		json.Unmarshal([]byte(exec2.SummaryData), &summary2)
+	}
+
+	// 构建 ExecutionSummary
+	es1 := buildExecutionSummary(exec1, summary1)
+	es2 := buildExecutionSummary(exec2, summary2)
+
+	// 计算差异
+	diffs := calculateDifferences(summary1, summary2)
+
+	return &ComparisonResult{
+		Execution1:  es1,
+		Execution2:  es2,
+		Differences: diffs,
+	}, nil
+}
+
+// buildExecutionSummary 从执行记录和 summary_data 构建 ExecutionSummary
+func buildExecutionSummary(exec *model.Execution, summary map[string]interface{}) ExecutionSummary {
+	es := ExecutionSummary{
+		ID:         exec.ID,
+		ScriptName: exec.ScriptName,
+		Status:     exec.Status,
+		StartTime:  exec.StartTime,
+		Duration:   exec.Duration,
+		IsBaseline: exec.IsBaseline,
+	}
+
+	if summary != nil {
+		// 提取指标
+		if v, ok := summary["total_samples"].(float64); ok {
+			es.TotalSamples = int64(v)
+		}
+		if v, ok := summary["avg_rt"].(float64); ok {
+			es.AvgRT = v
+		}
+		if v, ok := summary["tps"].(float64); ok {
+			es.TPS = v
+		}
+		if v, ok := summary["error_rate"].(float64); ok {
+			es.ErrorRate = v
+		}
+		if v, ok := summary["p90_rt"].(float64); ok {
+			es.P90RT = v
+		}
+		if v, ok := summary["p95_rt"].(float64); ok {
+			es.P95RT = v
+		}
+		if v, ok := summary["p99_rt"].(float64); ok {
+			es.P99RT = v
+		}
+	}
+
+	return es
+}
+
+// calculateDifferences 计算指标差异
+func calculateDifferences(summary1, summary2 map[string]interface{}) []MetricDiff {
+	var diffs []MetricDiff
+
+	// 定义要对比的指标
+	metrics := []struct {
+		key            string
+		label          string
+		unit           string
+		higherIsBetter bool
+	}{
+		{"avg_rt", "平均响应时间", "ms", false},
+		{"tps", "吞吐量", "req/s", true},
+		{"error_rate", "错误率", "%", false},
+		{"p90_rt", "P90响应时间", "ms", false},
+		{"p95_rt", "P95响应时间", "ms", false},
+		{"p99_rt", "P99响应时间", "ms", false},
+	}
+
+	for _, m := range metrics {
+		value1 := getFloatValue(summary1, m.key)
+		value2 := getFloatValue(summary2, m.key)
+
+		diffPct := 0.0
+		if value1 != 0 {
+			diffPct = ((value2 - value1) / value1) * 100
+		}
+
+		// 判断是否改善
+		// 对于 TPS: 越高越好，value2 > value1 → improved=true
+		// 对于 avg_rt/error_rate: 越低越好，value2 < value1 → improved=true
+		improved := false
+		if m.higherIsBetter {
+			improved = value2 > value1
+		} else {
+			improved = value2 < value1
+		}
+
+		diffs = append(diffs, MetricDiff{
+			Metric:   m.key,
+			Label:    m.label,
+			Value1:   value1,
+			Value2:   value2,
+			DiffPct:  diffPct,
+			Improved: improved,
+			Unit:     m.unit,
+		})
+	}
+
+	return diffs
+}
+
+// getFloatValue 从 map 中获取 float64 值
+func getFloatValue(m map[string]interface{}, key string) float64 {
+	if m == nil {
+		return 0
+	}
+	if v, ok := m[key].(float64); ok {
+		return v
+	}
+	return 0
+}
+
+// GetBaselineForScript 获取脚本的基准线执行记录
+func GetBaselineForScript(scriptID int64) (*model.Execution, error) {
+	var e model.Execution
+	var endTime, summaryData, remarks sql.NullString
+	var duration sql.NullInt64
+	var isBaseline int
+	err := database.DB.QueryRow(
+		"SELECT id, script_id, script_name, slave_ids, status, start_time, end_time, duration, remarks, result_path, report_path, summary_data, log_path, is_baseline, created_at FROM executions WHERE script_id = ? AND is_baseline = 1",
+		scriptID,
+	).Scan(
+		&e.ID, &e.ScriptID, &e.ScriptName, &e.SlaveIDs, &e.Status,
+		&e.StartTime, &endTime, &duration, &remarks, &e.ResultPath, &e.ReportPath,
+		&summaryData, &e.LogPath, &isBaseline, &e.CreatedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("该脚本没有设置基准线")
+		}
+		return nil, fmt.Errorf("查询基准线失败: %w", err)
+	}
+
+	if endTime.Valid {
+		e.EndTime = endTime.String
+	}
+	if duration.Valid {
+		e.Duration = duration.Int64
+	}
+	if remarks.Valid {
+		e.Remarks = remarks.String
+	}
+	if summaryData.Valid {
+		e.SummaryData = summaryData.String
+	}
+	e.IsBaseline = isBaseline == 1
+
+	return &e, nil
 }

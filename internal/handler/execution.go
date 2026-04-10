@@ -33,6 +33,7 @@ type CreateExecutionRequest struct {
 	Remarks         string  `json:"remarks"`
 	SaveHTTPDetails bool    `json:"save_http_details"`
 	IncludeMaster   bool    `json:"include_master"`
+	SplitCSV        bool    `json:"split_csv"` // 是否拆分 CSV 文件
 }
 
 // CreateExecution 创建并启动执行
@@ -43,7 +44,7 @@ func CreateExecution(c *gin.Context) {
 		return
 	}
 
-	execution, err := service.CreateExecution(req.ScriptID, req.SlaveIDs, req.Remarks, req.SaveHTTPDetails, req.IncludeMaster)
+	execution, err := service.CreateExecution(req.ScriptID, req.SlaveIDs, req.Remarks, req.SaveHTTPDetails, req.IncludeMaster, req.SplitCSV)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, model.Error(err.Error()))
 		return
@@ -725,4 +726,61 @@ func readExecutionLogTail(logPath string, tail int) (string, error) {
 		filtered = filtered[len(filtered)-tail:]
 	}
 	return strings.Join(filtered, "\n"), nil
+}
+
+// SetBaselineRequest 设置/取消基准线请求
+type SetBaselineRequest struct {
+	Action string `json:"action"` // "set" or "unset"
+}
+
+// SetBaseline 设置或取消基准线
+func SetBaseline(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error("无效的ID"))
+		return
+	}
+
+	var req SetBaselineRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, model.Error("无效的请求参数"))
+		return
+	}
+
+	var opErr error
+	if req.Action == "unset" {
+		opErr = service.UnsetBaseline(id)
+	} else {
+		opErr = service.SetBaseline(id)
+	}
+
+	if opErr != nil {
+		c.JSON(http.StatusInternalServerError, model.Error(opErr.Error()))
+		return
+	}
+
+	c.JSON(http.StatusOK, model.Success(gin.H{"success": true}))
+}
+
+// CompareExecutions 对比两次执行
+func CompareExecutions(c *gin.Context) {
+	id1, err := strconv.ParseInt(c.Query("id1"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error("无效的执行ID1"))
+		return
+	}
+
+	id2, err := strconv.ParseInt(c.Query("id2"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error("无效的执行ID2"))
+		return
+	}
+
+	result, err := service.CompareExecutions(id1, id2)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error(err.Error()))
+		return
+	}
+
+	c.JSON(http.StatusOK, model.Success(result))
 }

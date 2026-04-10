@@ -324,3 +324,73 @@ func DeleteFile(c *gin.Context) {
 
 	c.JSON(http.StatusOK, model.Success(nil))
 }
+
+// GetScriptVersions GET /api/scripts/:id/versions
+func GetScriptVersions(c *gin.Context) {
+	scriptID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error("无效的脚本ID"))
+		return
+	}
+
+	versions, err := service.GetScriptVersions(scriptID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error(err.Error()))
+		return
+	}
+
+	c.JSON(http.StatusOK, model.Success(versions))
+}
+
+// GetScriptVersionContent GET /api/scripts/:id/versions/:versionId
+func GetScriptVersionContent(c *gin.Context) {
+	scriptID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error("无效的脚本ID"))
+		return
+	}
+
+	versionID, err := strconv.ParseInt(c.Param("versionId"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error("无效的版本ID"))
+		return
+	}
+
+	version, err := service.GetScriptVersionContent(scriptID, versionID)
+	if err != nil {
+		if err.Error() == "版本不存在" {
+			c.JSON(http.StatusNotFound, model.Error(err.Error()))
+			return
+		}
+		c.JSON(http.StatusInternalServerError, model.Error(err.Error()))
+		return
+	}
+
+	c.JSON(http.StatusOK, model.Success(version))
+}
+
+// RestoreScriptVersion POST /api/scripts/:id/versions/:versionId/restore
+func RestoreScriptVersion(c *gin.Context) {
+	scriptID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error("无效的脚本ID"))
+		return
+	}
+
+	versionID, err := strconv.ParseInt(c.Param("versionId"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error("无效的版本ID"))
+		return
+	}
+
+	if err := service.RestoreScriptVersion(scriptID, versionID); err != nil {
+		if err.Error() == "版本不存在" || err.Error() == "脚本不存在" {
+			c.JSON(http.StatusNotFound, model.Error(err.Error()))
+			return
+		}
+		c.JSON(http.StatusInternalServerError, model.Error(err.Error()))
+		return
+	}
+
+	c.JSON(http.StatusOK, model.SuccessWithMsg("版本已回滚"))
+}

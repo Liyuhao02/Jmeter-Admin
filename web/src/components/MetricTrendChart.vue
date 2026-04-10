@@ -79,6 +79,12 @@
           class="trend-line"
           :style="{ stroke: color }"
         />
+        <polyline
+          v-if="secondLinePoints && secondField"
+          :points="secondLinePoints"
+          class="trend-line second-line"
+          :style="{ stroke: secondColor }"
+        />
         <circle
           v-if="activePoint"
           :cx="activePoint.x"
@@ -86,6 +92,14 @@
           r="4.5"
           class="active-dot"
           :style="{ stroke: color, fill: color }"
+        />
+        <circle
+          v-if="secondActivePoint && secondField"
+          :cx="secondActivePoint.x"
+          :cy="secondActivePoint.y"
+          r="4.5"
+          class="active-dot second-active-dot"
+          :style="{ stroke: secondColor, fill: secondColor }"
         />
         <line
           v-if="activePoint"
@@ -115,6 +129,11 @@
           <span>{{ title }}</span>
           <strong>{{ formatMetricValue(activePoint.rawValue) }}{{ unitSuffix }}</strong>
         </div>
+        <div v-if="secondActivePoint && secondField" class="metric-tooltip-row second-row">
+          <span class="metric-tooltip-dot" :style="{ background: secondColor }"></span>
+          <span>{{ secondLabel || secondField }}</span>
+          <strong>{{ formatMetricValue(secondActivePoint.rawValue) }}{{ unitSuffix }}</strong>
+        </div>
       </div>
     </div>
   </div>
@@ -133,7 +152,11 @@ const props = defineProps({
   color: { type: String, default: '#38bdf8' },
   height: { type: Number, default: 220 },
   showExpand: { type: Boolean, default: false },
-  maxXTicks: { type: Number, default: 4 }
+  maxXTicks: { type: Number, default: 4 },
+  // 第二条线配置
+  secondField: { type: String, default: '' },
+  secondColor: { type: String, default: '#ef4444' },
+  secondLabel: { type: String, default: '' }
 })
 
 defineEmits(['expand'])
@@ -156,16 +179,21 @@ const chartData = computed(() => {
     index,
     timestamp: item?.timestamp || '--:--:--',
     epochSecond: Number(item?.epoch_second || 0),
-    rawValue: Number(item?.[props.field] || 0)
+    rawValue: Number(item?.[props.field] || 0),
+    secondRawValue: props.secondField ? Number(item?.[props.secondField] || 0) : 0
   }))
 })
 
 const chartValues = computed(() => chartData.value.map(item => item.rawValue))
+const secondChartValues = computed(() => props.secondField ? chartData.value.map(item => item.secondRawValue) : [])
 
 const valueMax = computed(() => {
   const values = chartValues.value
-  if (!values.length) return 1
-  return Math.max(...values, 1)
+  const secondValues = secondChartValues.value
+  if (!values.length && !secondValues.length) return 1
+  const max1 = values.length ? Math.max(...values) : 0
+  const max2 = secondValues.length ? Math.max(...secondValues) : 0
+  return Math.max(max1, max2, 1)
 })
 
 const yTicks = computed(() => {
@@ -196,6 +224,30 @@ const chartPoints = computed(() => {
       y: Math.max(chartTop, Math.min(chartBottom.value, y))
     }
   })
+})
+
+const secondChartPoints = computed(() => {
+  if (!props.secondField) return []
+  const values = secondChartValues.value
+  if (!values.length) return []
+  const stepX = values.length > 1 ? chartWidth.value / (values.length - 1) : 0
+
+  return chartData.value.map((item, index) => {
+    const ratio = valueMax.value > 0 ? item.secondRawValue / valueMax.value : 0
+    const x = chartLeft.value + index * stepX
+    const y = chartBottom.value - ratio * chartHeight.value
+    return {
+      ...item,
+      x,
+      y: Math.max(chartTop, Math.min(chartBottom.value, y)),
+      rawValue: item.secondRawValue
+    }
+  })
+})
+
+const secondLinePoints = computed(() => {
+  if (secondChartPoints.value.length < 2) return ''
+  return secondChartPoints.value.map(point => `${point.x},${point.y}`).join(' ')
 })
 
 const linePoints = computed(() => {
@@ -231,6 +283,11 @@ const xTicks = computed(() => {
 const activePoint = computed(() => {
   if (activeIndex.value < 0) return null
   return chartPoints.value[activeIndex.value] || null
+})
+
+const secondActivePoint = computed(() => {
+  if (activeIndex.value < 0 || !props.secondField) return null
+  return secondChartPoints.value[activeIndex.value] || null
 })
 
 const tooltipStyle = computed(() => {
@@ -391,6 +448,11 @@ const handleHover = (event) => {
   stroke-linecap: round;
 }
 
+.trend-line.second-line {
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+}
+
 .chart-overlay {
   fill: transparent;
   cursor: crosshair;
@@ -404,6 +466,10 @@ const handleHover = (event) => {
 .active-dot {
   stroke-width: 2;
   filter: drop-shadow(0 0 10px rgba(56, 189, 248, 0.35));
+}
+
+.active-dot.second-active-dot {
+  filter: drop-shadow(0 0 10px rgba(239, 68, 68, 0.35));
 }
 
 .metric-tooltip {
@@ -436,6 +502,12 @@ const handleHover = (event) => {
 .metric-tooltip-row strong {
   margin-left: auto;
   font-family: 'Consolas', 'Monaco', 'Fira Code', monospace;
+}
+
+.metric-tooltip-row.second-row {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .metric-tooltip-dot {

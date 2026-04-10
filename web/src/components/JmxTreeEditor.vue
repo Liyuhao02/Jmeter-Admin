@@ -5,24 +5,93 @@
       <div class="panel-header">
         <div class="panel-header-row">
           <span class="panel-title">元素树</span>
-          <el-tag size="small" type="info">{{ totalNodeCount }}</el-tag>
-        </div>
-        <el-input
-          v-model="treeFilterKeyword"
-          clearable
-          placeholder="搜索元素名称、类型或摘要"
-          class="tree-search-input"
-          aria-label="搜索 JMX 元素"
-        >
-          <template #prefix>
-            <el-icon><Search /></el-icon>
-          </template>
-        </el-input>
-        <div class="tree-toolbar">
-          <div class="tree-toolbar-row">
-            <el-button size="small" class="tree-tool-btn" @click="expandAllNodes">展开全部</el-button>
-            <el-button size="small" class="tree-tool-btn" @click="collapseAllNodes">收起全部</el-button>
+          <div class="panel-header-actions">
+            <el-tag size="small" type="info">{{ totalNodeCount }}</el-tag>
+            <el-button
+              link
+              size="small"
+              class="shortcut-help-btn"
+              @click="shortcutDialogVisible = true"
+              title="键盘快捷键"
+            >
+              <el-icon><InfoFilled /></el-icon>
+            </el-button>
           </div>
+        </div>
+        <div class="search-row">
+          <el-input
+            v-model="treeFilterKeyword"
+            clearable
+            placeholder="搜索元素名称、类型或摘要"
+            class="tree-search-input"
+            aria-label="搜索 JMX 元素"
+          >
+            <template #prefix>
+              <el-icon><Search /></el-icon>
+            </template>
+          </el-input>
+          <el-button-group class="expand-collapse-group">
+            <el-button size="small" @click="expandAllNodes" title="全部展开">
+              <el-icon><Bottom /></el-icon>
+            </el-button>
+            <el-button size="small" @click="collapseAllNodes" title="全部折叠">
+              <el-icon><Top /></el-icon>
+            </el-button>
+          </el-button-group>
+        </div>
+
+        <!-- 快捷添加工具栏 -->
+        <div v-if="selectedNode && getQuickAddElements.length > 0" class="quick-add-toolbar">
+          <div class="quick-add-label">
+            <el-icon><Plus /></el-icon>
+            <span>快捷添加</span>
+          </div>
+          <div class="quick-add-buttons">
+            <el-tooltip
+              v-for="elem in getQuickAddElements"
+              :key="elem.type"
+              :content="elem.label"
+              placement="top"
+              :show-after="300"
+            >
+              <el-button
+                size="small"
+                class="quick-add-btn"
+                @click="quickAddElement(elem.type)"
+              >
+                <el-icon :style="{ color: getElementIconColor(elem.type) }">
+                  <component :is="iconMap[elem.icon] || iconMap.QuestionFilled" />
+                </el-icon>
+                <span class="quick-add-text">{{ elem.label }}</span>
+              </el-button>
+            </el-tooltip>
+          </div>
+        </div>
+
+        <!-- 多选批量操作工具栏 -->
+        <div v-if="isMultiSelectMode" class="batch-toolbar">
+          <div class="batch-info">
+            <el-tag size="small" type="primary" effect="dark">
+              已选 {{ multiSelectCount }} 个
+            </el-tag>
+            <el-button link size="small" @click="clearMultiSelect">
+              清空
+            </el-button>
+          </div>
+          <div class="batch-actions">
+            <el-button size="small" type="success" @click="batchToggleEnabled(true)">
+              <el-icon><CircleCheck /></el-icon> 启用
+            </el-button>
+            <el-button size="small" type="warning" @click="batchToggleEnabled(false)">
+              <el-icon><CircleClose /></el-icon> 禁用
+            </el-button>
+            <el-button size="small" type="danger" @click="batchDelete">
+              <el-icon><Delete /></el-icon> 删除
+            </el-button>
+          </div>
+        </div>
+
+        <div class="tree-toolbar">
           <div v-if="selectedNode" class="tree-selection-toolbar">
             <div class="tree-selection-meta">
               <span class="tree-selection-label">已选节点</span>
@@ -115,14 +184,21 @@
           class="jmx-tree"
         >
           <template #default="{ data }">
-            <div class="tree-node" :class="{ 'is-selected': selectedNode?.id === data.id, 'is-disabled': data.enabled === false || data.enabled === 'false' }">
+            <div
+              class="tree-node"
+              :class="{
+                'is-selected': selectedNode?.id === data.id,
+                'is-multi-selected': isNodeMultiSelected(data),
+                'is-disabled': data.enabled === false || data.enabled === 'false'
+              }"
+            >
               <div class="node-main">
                 <div class="node-top-row">
                   <div class="node-title-wrap">
                     <el-icon class="node-icon" :style="{ color: getNodeIconColor(data) }">
                       <component :is="getNodeIcon(data)" />
                     </el-icon>
-                    <span class="node-name" :title="data.testname || data.testclass">{{ data.testname || getNodeShortLabel(data) }}</span>
+                    <span class="node-label" :title="data.testname || data.testclass">{{ data.testname || getNodeShortLabel(data) }}</span>
                   </div>
                   <div class="node-top-side">
                     <div class="node-badges">
@@ -208,9 +284,16 @@
                   </div>
                 </div>
                 <div class="node-meta-row">
-                  <span class="node-summary" :class="{ 'is-empty': !getNodeSummary(data) }">
-                    {{ getNodeSummary(data) || getNodeMetaHint(data) }}
-                  </span>
+                  <el-tooltip
+                    :content="getNodeSummary(data) || getNodeMetaHint(data)"
+                    placement="top"
+                    :show-after="300"
+                    :disabled="!(getNodeSummary(data) || getNodeMetaHint(data))"
+                  >
+                    <span class="node-summary" :class="{ 'is-empty': !getNodeSummary(data) }">
+                      {{ getNodeSummary(data) || getNodeMetaHint(data) }}
+                    </span>
+                  </el-tooltip>
                 </div>
               </div>
             </div>
@@ -536,11 +619,56 @@
         </el-tab-pane>
       </el-tabs>
     </el-dialog>
+
+    <!-- 键盘快捷键提示对话框 -->
+    <el-dialog
+      v-model="shortcutDialogVisible"
+      title="键盘快捷键"
+      width="480px"
+      class="shortcut-dialog"
+    >
+      <div class="shortcut-list">
+        <div class="shortcut-section">
+          <h4>节点操作</h4>
+          <div class="shortcut-item">
+            <kbd>Delete</kbd> / <kbd>Backspace</kbd>
+            <span>删除选中节点</span>
+          </div>
+          <div class="shortcut-item">
+            <kbd>Ctrl</kbd> + <kbd>D</kbd>
+            <span>复制选中节点</span>
+          </div>
+          <div class="shortcut-item">
+            <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>E</kbd>
+            <span>启用/禁用选中节点</span>
+          </div>
+          <div class="shortcut-item">
+            <kbd>Ctrl</kbd> + <kbd>↑</kbd>
+            <span>上移节点</span>
+          </div>
+          <div class="shortcut-item">
+            <kbd>Ctrl</kbd> + <kbd>↓</kbd>
+            <span>下移节点</span>
+          </div>
+        </div>
+        <div class="shortcut-section">
+          <h4>多选操作</h4>
+          <div class="shortcut-item">
+            <kbd>Ctrl</kbd> + <kbd>Click</kbd>
+            <span>多选/取消选择节点</span>
+          </div>
+          <div class="shortcut-item">
+            <kbd>Delete</kbd>
+            <span>批量删除选中的节点</span>
+          </div>
+        </div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, watch, computed, nextTick } from 'vue'
+import { ref, watch, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   Document,
@@ -581,7 +709,11 @@ import {
   CircleCheck,
   DocumentCopy,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
+  ArrowRight,
+  Bottom,
+  Top,
+  InfoFilled
 } from '@element-plus/icons-vue'
 import {
   parseJMX,
@@ -652,12 +784,17 @@ const iconMap = {
   CircleCheck,
   DocumentCopy,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
+  ArrowRight,
+  Bottom,
+  Top,
+  InfoFilled
 }
 
 // 状态
 const treeData = ref([])
 const selectedNode = ref(null)
+const selectedNodeRef = ref(null) // el-tree 的 Node 对象引用（用于键盘快捷键）
 const originalXml = ref('')
 const keyValueListData = ref([])
 const stringListData = ref({})
@@ -665,11 +802,35 @@ const treeFilterKeyword = ref('')
 const treeRef = ref(null)
 const lastLocalXml = ref('')
 
+// 多选状态
+const multiSelectedNodes = ref(new Set())
+const isMultiSelectMode = computed(() => multiSelectedNodes.value.size > 0)
+const multiSelectCount = computed(() => multiSelectedNodes.value.size)
+
 // 添加元素相关状态
 const addElementDialogVisible = ref(false)
 const addElementTarget = ref(null)
 const addElementTab = ref('sampler')
 const insertMode = ref('child') // 'child' | 'before' | 'after'
+
+// 快捷键提示对话框
+const shortcutDialogVisible = ref(false)
+
+// 常用快捷元素配置
+const quickElements = [
+  { type: 'HTTPSamplerProxy', label: 'HTTP请求', icon: 'Link', category: 'sampler' },
+  { type: 'ThreadGroup', label: '线程组', icon: 'User', category: 'threadGroup' },
+  { type: 'LoopController', label: '循环控制器', icon: 'RefreshRight', category: 'controller' },
+  { type: 'TransactionController', label: '事务控制器', icon: 'Folder', category: 'controller' },
+  { type: 'IfController', label: 'IF控制器', icon: 'Switch', category: 'controller' },
+  { type: 'CSVDataSet', label: 'CSV数据', icon: 'Grid', category: 'config' },
+  { type: 'HeaderManager', label: 'HTTP头', icon: 'List', category: 'config' },
+  { type: 'ConstantTimer', label: '定时器', icon: 'Timer', category: 'timer' },
+  { type: 'ResponseAssertion', label: '断言', icon: 'Check', category: 'assertion' },
+  { type: 'JSONPostProcessor', label: 'JSON提取', icon: 'Search', category: 'postProcessor' },
+  { type: 'RegexExtractor', label: '正则提取', icon: 'Search', category: 'postProcessor' },
+  { type: 'ResultCollector', label: '结果树', icon: 'DataAnalysis', category: 'listener' }
+]
 
 // 初始化解析
 const getSourceXml = () => props.modelValue || props.xmlContent || ''
@@ -986,8 +1147,103 @@ const deleteNode = (node) => {
 }
 
 // 处理节点点击
-const handleNodeClick = (data) => {
+const handleNodeClick = (data, node, treeNode, event) => {
+  // 保存 el-tree 的 Node 对象引用（用于键盘快捷键）
+  selectedNodeRef.value = node
+
+  // 多选模式：按住 Ctrl/Cmd 点击
+  if (event?.ctrlKey || event?.metaKey) {
+    event?.preventDefault()
+    if (multiSelectedNodes.value.has(data.id)) {
+      multiSelectedNodes.value.delete(data.id)
+    } else {
+      multiSelectedNodes.value.add(data.id)
+    }
+    // 触发响应式更新
+    multiSelectedNodes.value = new Set(multiSelectedNodes.value)
+    // 单选当前节点但不清空多选
+    focusNode(data)
+    return
+  }
+
+  // 普通点击：清空多选
+  if (!event?.shiftKey) {
+    multiSelectedNodes.value.clear()
+    multiSelectedNodes.value = new Set()
+  }
+
   focusNode(data)
+}
+
+// 检查节点是否被多选
+const isNodeMultiSelected = (data) => {
+  return multiSelectedNodes.value.has(data.id)
+}
+
+// 获取多选节点数据数组
+const getMultiSelectedNodesData = () => {
+  const result = []
+  const traverse = (nodes) => {
+    for (const node of nodes) {
+      if (multiSelectedNodes.value.has(node.id)) {
+        result.push(node)
+      }
+      if (node.children?.length) {
+        traverse(node.children)
+      }
+    }
+  }
+  traverse(treeData.value)
+  return result
+}
+
+// 批量删除
+const batchDelete = () => {
+  const nodesToDelete = getMultiSelectedNodesData()
+  if (nodesToDelete.length === 0) return
+
+  // 过滤掉 TestPlan
+  const deletableNodes = nodesToDelete.filter(n => n.testclass !== 'TestPlan')
+  if (deletableNodes.length === 0) {
+    ElMessage.warning('测试计划不能删除')
+    return
+  }
+
+  // 逐个删除
+  deletableNodes.forEach(node => {
+    const result = findParentNode(node)
+    if (!result) return
+    const { siblings } = result
+    const index = siblings.findIndex(c => c.id === node.id)
+    if (index > -1) {
+      siblings.splice(index, 1)
+    }
+  })
+
+  multiSelectedNodes.value.clear()
+  multiSelectedNodes.value = new Set()
+  emitUpdate()
+  focusNode(null)
+  ElMessage.success(`已删除 ${deletableNodes.length} 个节点`)
+}
+
+// 批量启用/禁用
+const batchToggleEnabled = (enabled) => {
+  const nodesToToggle = getMultiSelectedNodesData()
+  if (nodesToToggle.length === 0) return
+
+  nodesToToggle.forEach(node => {
+    node.enabled = enabled
+  })
+
+  emitUpdate()
+  ElMessage.success(`已${enabled ? '启用' : '禁用'} ${nodesToToggle.length} 个节点`)
+}
+
+// 清空多选
+const clearMultiSelect = () => {
+  multiSelectedNodes.value.clear()
+  multiSelectedNodes.value = new Set()
 }
 
 // 检查是否有元数据定义
@@ -1207,6 +1463,125 @@ const expandAllNodes = () => {
 
 const collapseAllNodes = () => {
   nextTick(() => updateTreeExpansionState(false))
+}
+
+// ========== 键盘快捷键处理 ==========
+
+const handleKeydown = (e) => {
+  // 确保不在输入框、文本域或内容编辑元素中时才触发
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return
+  if (e.target.contentEditable === 'true') return
+
+  // 多选模式下，只支持 Delete 批量删除
+  if (isMultiSelectMode.value) {
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault()
+      batchDelete()
+    }
+    return
+  }
+
+  // 单选模式下，需要选中节点才能操作
+  if (!selectedNodeRef.value) return
+
+  switch (e.key) {
+    case 'Delete':
+    case 'Backspace':
+      e.preventDefault()
+      if (selectedNode.value && selectedNode.value.testclass !== 'TestPlan') {
+        deleteNode(selectedNode.value)
+      }
+      break
+  }
+
+  // Ctrl/Cmd 快捷键
+  if (e.ctrlKey || e.metaKey) {
+    switch (e.key) {
+      case 'd':
+      case 'D':
+        e.preventDefault()
+        if (selectedNode.value && selectedNode.value.testclass !== 'TestPlan') {
+          copyNode(selectedNode.value)
+        }
+        break
+      case 'ArrowUp':
+        e.preventDefault()
+        if (selectedNode.value && selectedNode.value.testclass !== 'TestPlan') {
+          moveNodeUp(selectedNode.value)
+        }
+        break
+      case 'ArrowDown':
+        e.preventDefault()
+        if (selectedNode.value && selectedNode.value.testclass !== 'TestPlan') {
+          moveNodeDown(selectedNode.value)
+        }
+        break
+    }
+
+    // Ctrl+Shift+E 启用/禁用
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'e' || e.key === 'E')) {
+      e.preventDefault()
+      if (selectedNode.value) {
+        toggleNodeEnabled(selectedNode.value)
+      }
+    }
+  }
+}
+
+// 注册和移除键盘事件监听
+onMounted(() => {
+  document.addEventListener('keydown', handleKeydown)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('keydown', handleKeydown)
+})
+
+// ========== 快捷添加元素相关函数 ==========
+
+// 获取当前选中节点可以快捷添加的元素列表
+const getQuickAddElements = computed(() => {
+  if (!selectedNode.value) return []
+
+  const node = selectedNode.value
+  const isLeaf = isLeafElement(node.testclass)
+
+  // 如果是叶子节点，基于父节点判断可添加的元素（插入到后面）
+  if (isLeaf) {
+    const result = findParentNode(node)
+    if (!result || !result.parent) return []
+    const parentTestclass = result.parent.testclass
+    return quickElements.filter(elem => isAllowedChild(parentTestclass, elem.type))
+  }
+
+  // 非叶子节点，基于当前节点判断可添加的子元素
+  return quickElements.filter(elem => isAllowedChild(node.testclass, elem.type))
+})
+
+// 快捷添加元素
+const quickAddElement = (elementType) => {
+  if (!selectedNode.value) return
+
+  const node = selectedNode.value
+  const isLeaf = isLeafElement(node.testclass)
+
+  // 如果是叶子节点，插入到后面
+  if (isLeaf) {
+    const result = findParentNode(node)
+    if (!result || !result.siblings) {
+      ElMessage.error('无法找到插入位置')
+      return
+    }
+    insertMode.value = 'after'
+    addElementTarget.value = node
+  } else {
+    // 非叶子节点，添加为子元素
+    insertMode.value = 'child'
+    addElementTarget.value = node
+  }
+
+  // 调用添加元素
+  addElement(elementType)
 }
 
 // ========== 添加元素相关函数 ==========
@@ -1652,6 +2027,130 @@ const moveNodeDown = (node) => {
   }
 }
 
+// 搜索行（包含展开/折叠按钮）
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+
+  .tree-search-input {
+    flex: 1;
+  }
+
+  .expand-collapse-group {
+    flex-shrink: 0;
+  }
+}
+
+// 面板头部操作区
+.panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shortcut-help-btn {
+  padding: 4px;
+  height: auto;
+  color: var(--text-secondary);
+
+  &:hover {
+    color: var(--accent-blue);
+  }
+}
+
+// 快捷添加工具栏
+.quick-add-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border-radius: 12px;
+  background: rgba(10, 132, 255, 0.06);
+  border: 1px solid rgba(10, 132, 255, 0.12);
+
+  .quick-add-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--accent-blue);
+
+    .el-icon {
+      font-size: 14px;
+    }
+  }
+
+  .quick-add-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .quick-add-btn {
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-secondary);
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.1);
+      border-color: rgba(255, 255, 255, 0.15);
+      color: var(--text-primary);
+    }
+
+    .el-icon {
+      font-size: 14px;
+    }
+
+    .quick-add-text {
+      max-width: 80px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+}
+
+// 多选批量操作工具栏
+.batch-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  margin-bottom: 12px;
+  border-radius: 12px;
+  background: rgba(10, 132, 255, 0.1);
+  border: 1px solid rgba(10, 132, 255, 0.2);
+
+  .batch-info {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .batch-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+
+    .el-button {
+      flex: 1;
+      min-width: 80px;
+    }
+  }
+}
+
 .tree-toolbar {
   display: flex;
   flex-direction: column;
@@ -1995,6 +2494,12 @@ const moveNodeDown = (node) => {
     box-shadow: inset 3px 0 0 rgba(10, 132, 255, 0.88);
   }
 
+  &.is-multi-selected {
+    background: rgba(10, 132, 255, 0.15);
+    border-color: rgba(10, 132, 255, 0.3);
+    box-shadow: inset 0 0 0 1px rgba(10, 132, 255, 0.4);
+  }
+
   &.is-disabled {
     opacity: 0.45;
 
@@ -2030,7 +2535,7 @@ const moveNodeDown = (node) => {
     flex-shrink: 0;
   }
 
-  .node-name {
+  .node-label {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2341,6 +2846,52 @@ const moveNodeDown = (node) => {
 /* 分割线 */
 :deep(.el-divider) {
   border-color: rgba(255, 255, 255, 0.06);
+}
+
+/* 快捷键提示对话框样式 */
+.shortcut-dialog {
+  .shortcut-list {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .shortcut-section {
+    h4 {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin: 0 0 12px 0;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+  }
+
+  .shortcut-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 0;
+    font-size: 13px;
+    color: var(--text-secondary);
+
+    kbd {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 24px;
+      height: 24px;
+      padding: 0 8px;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-primary);
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 6px;
+      box-shadow: 0 2px 0 rgba(0, 0, 0, 0.2);
+    }
+  }
 }
 
 @media (max-width: 1400px) {

@@ -115,6 +115,11 @@ func createTables() error {
 		return fmt.Errorf("迁移 slaves 表失败: %w", err)
 	}
 
+	// 创建 script_versions 表
+	if err := createScriptVersionsTable(); err != nil {
+		return fmt.Errorf("创建 script_versions 表失败: %w", err)
+	}
+
 	// 创建索引
 	if err := createIndexes(); err != nil {
 		return fmt.Errorf("创建索引失败: %w", err)
@@ -143,6 +148,15 @@ func migrateExecutionsTable() error {
 		}
 	}
 
+	// 检查并添加 is_baseline 列
+	var isBaselineExists int
+	err = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('executions') WHERE name='is_baseline'").Scan(&isBaselineExists)
+	if err == nil && isBaselineExists == 0 {
+		if _, err := DB.Exec("ALTER TABLE executions ADD COLUMN is_baseline INTEGER DEFAULT 0"); err != nil {
+			return fmt.Errorf("添加 is_baseline 列失败: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -160,12 +174,87 @@ func migrateScriptFilesTable() error {
 
 // migrateSlavesTable 迁移 slaves 表
 func migrateSlavesTable() error {
+	// 添加 last_check_time 列
 	var lastCheckTimeExists int
 	err := DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('slaves') WHERE name='last_check_time'").Scan(&lastCheckTimeExists)
 	if err == nil && lastCheckTimeExists == 0 {
 		if _, err := DB.Exec("ALTER TABLE slaves ADD COLUMN last_check_time DATETIME"); err != nil {
 			return fmt.Errorf("添加 last_check_time 列失败: %w", err)
 		}
+	}
+
+	// 添加 agent_port 列
+	var agentPortExists int
+	err = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('slaves') WHERE name='agent_port'").Scan(&agentPortExists)
+	if err == nil && agentPortExists == 0 {
+		if _, err := DB.Exec("ALTER TABLE slaves ADD COLUMN agent_port INTEGER DEFAULT 8089"); err != nil {
+			return fmt.Errorf("添加 agent_port 列失败: %w", err)
+		}
+	}
+
+	// 添加 agent_token 列
+	var agentTokenExists int
+	err = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('slaves') WHERE name='agent_token'").Scan(&agentTokenExists)
+	if err == nil && agentTokenExists == 0 {
+		if _, err := DB.Exec("ALTER TABLE slaves ADD COLUMN agent_token TEXT DEFAULT ''"); err != nil {
+			return fmt.Errorf("添加 agent_token 列失败: %w", err)
+		}
+	}
+
+	// 添加 agent_status 列
+	var agentStatusExists int
+	err = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('slaves') WHERE name='agent_status'").Scan(&agentStatusExists)
+	if err == nil && agentStatusExists == 0 {
+		if _, err := DB.Exec("ALTER TABLE slaves ADD COLUMN agent_status TEXT DEFAULT 'offline'"); err != nil {
+			return fmt.Errorf("添加 agent_status 列失败: %w", err)
+		}
+	}
+
+	// 添加 agent_check_time 列
+	var agentCheckTimeExists int
+	err = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('slaves') WHERE name='agent_check_time'").Scan(&agentCheckTimeExists)
+	if err == nil && agentCheckTimeExists == 0 {
+		if _, err := DB.Exec("ALTER TABLE slaves ADD COLUMN agent_check_time DATETIME"); err != nil {
+			return fmt.Errorf("添加 agent_check_time 列失败: %w", err)
+		}
+	}
+
+	// 添加 system_stats 列
+	var systemStatsExists int
+	err = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('slaves') WHERE name='system_stats'").Scan(&systemStatsExists)
+	if err == nil && systemStatsExists == 0 {
+		if _, err := DB.Exec("ALTER TABLE slaves ADD COLUMN system_stats TEXT DEFAULT ''"); err != nil {
+			return fmt.Errorf("添加 system_stats 列失败: %w", err)
+		}
+	}
+
+	// 添加 agent_uptime 列
+	var agentUptimeExists int
+	err = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('slaves') WHERE name='agent_uptime'").Scan(&agentUptimeExists)
+	if err == nil && agentUptimeExists == 0 {
+		if _, err := DB.Exec("ALTER TABLE slaves ADD COLUMN agent_uptime INTEGER DEFAULT 0"); err != nil {
+			return fmt.Errorf("添加 agent_uptime 列失败: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// createScriptVersionsTable 创建脚本版本表
+func createScriptVersionsTable() error {
+	table := `
+	CREATE TABLE IF NOT EXISTS script_versions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		script_id INTEGER NOT NULL,
+		version_number INTEGER NOT NULL,
+		content TEXT NOT NULL,
+		content_hash TEXT NOT NULL,
+		change_summary TEXT,
+		created_at DATETIME NOT NULL,
+		FOREIGN KEY (script_id) REFERENCES scripts(id) ON DELETE CASCADE
+	);`
+	if _, err := DB.Exec(table); err != nil {
+		return fmt.Errorf("创建 script_versions 表失败: %w", err)
 	}
 	return nil
 }
@@ -177,6 +266,7 @@ func createIndexes() error {
 		`CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status);`,
 		`CREATE INDEX IF NOT EXISTS idx_executions_created_at ON executions(created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_script_files_script_id ON script_files(script_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_script_versions_script_id ON script_versions(script_id);`,
 	}
 
 	for _, sql := range indexes {

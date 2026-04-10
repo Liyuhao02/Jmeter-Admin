@@ -84,6 +84,42 @@
         <div class="section-label">OVERVIEW</div>
         <div class="section-title">执行概览</div>
       </div>
+      
+      <!-- 基准线对比卡片 -->
+      <div 
+        v-if="baselineComparison && !execution.is_baseline" 
+        class="baseline-compare-card"
+        v-loading="baselineLoading"
+      >
+        <div class="baseline-header">
+          <div class="baseline-title">
+            <el-icon><TrendCharts /></el-icon>
+            <span>与基准线对比</span>
+            <el-tag type="warning" size="small" class="baseline-tag">
+              <el-icon><StarFilled /></el-icon> 基准: #{{ baselineComparison.execution1.id }}
+            </el-tag>
+          </div>
+        </div>
+        <div class="baseline-metrics">
+          <div 
+            v-for="diff in baselineComparison.differences" 
+            :key="diff.metric" 
+            class="baseline-metric-item"
+          >
+            <span class="metric-name">{{ diff.label }}</span>
+            <span 
+              class="metric-change" 
+              :class="{ improved: diff.improved, worsened: !diff.improved && diff.diff_pct !== 0 }"
+            >
+              <span v-if="diff.diff_pct > 0" class="arrow-up">▲</span>
+              <span v-else-if="diff.diff_pct < 0" class="arrow-down">▼</span>
+              <span v-else class="arrow-flat">—</span>
+              {{ Math.abs(diff.diff_pct).toFixed(1) }}%
+            </span>
+          </div>
+        </div>
+      </div>
+      
       <div class="overview-panel">
         <div class="overview-hero">
           <div class="overview-status-strip">
@@ -224,6 +260,43 @@
           :max-x-ticks="4"
           @expand="openExpandedChart('success_rate')"
         />
+        <MetricTrendChart
+          title="P95/P99 响应时间"
+          :value="formatNumber(primaryMetricValue('p95_rt'))"
+          unit="ms"
+          :subline="'P99: ' + formatNumber(primaryMetricValue('p99_rt')) + ' ms'"
+          :points="liveMetrics.points || []"
+          field="p95_rt"
+          color="#f59e0b"
+          second-field="p99_rt"
+          second-color="#ef4444"
+          second-label="P99"
+          :show-expand="true"
+          :max-x-ticks="4"
+          @expand="openExpandedChart('p95_p99')"
+        />
+        <MetricTrendChart
+          title="错误数趋势"
+          :value="String(primaryMetricValue('error_count') || 0)"
+          unit="errors"
+          :points="liveMetrics.points || []"
+          field="error_count"
+          color="#ef4444"
+          :show-expand="true"
+          :max-x-ticks="4"
+          @expand="openExpandedChart('error_count')"
+        />
+        <MetricTrendChart
+          title="网络吞吐量"
+          :value="formatBytesRateValue(primaryMetricValue('bytes_per_sec'))"
+          unit="KB/s"
+          :points="bytesKBPoints"
+          field="bytes_per_sec"
+          color="#22c55e"
+          :show-expand="true"
+          :max-x-ticks="4"
+          @expand="openExpandedChart('bytes_per_sec')"
+        />
       </div>
     </div>
 
@@ -299,6 +372,72 @@
               仅展示前10000条
             </div>
             <div class="error-stat-label">记录截断</div>
+          </div>
+        </div>
+
+        <!-- 错误分布图表行 -->
+        <div class="error-charts-row" v-if="errorAnalysis.response_code_distribution?.length || errorAnalysis.error_timeline?.length">
+          <!-- 响应码分布饼图 -->
+          <div class="error-pie-section" v-if="errorAnalysis.response_code_distribution?.length">
+            <div class="error-chart-card">
+              <div class="error-chart-title">响应码分布</div>
+              <div class="error-pie-content">
+                <svg viewBox="0 0 100 100" class="error-pie-chart">
+                  <!-- 背景圆环 -->
+                  <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="18"/>
+                  <!-- 各段弧 -->
+                  <circle v-for="(segment, idx) in pieSegments" :key="idx"
+                    cx="50" cy="50" r="40" fill="none"
+                    :stroke="segment.color"
+                    stroke-width="18"
+                    :stroke-dasharray="`${segment.length} ${251.2 - segment.length}`"
+                    :stroke-dashoffset="segment.offset"
+                    transform="rotate(-90 50 50)"/>
+                  <!-- 中心文字 -->
+                  <text x="50" y="48" text-anchor="middle" class="pie-center-label">错误数</text>
+                  <text x="50" y="62" text-anchor="middle" class="pie-center-value">{{ errorAnalysis.total_errors.toLocaleString() }}</text>
+                </svg>
+                <!-- 图例 -->
+                <div class="error-pie-legend">
+                  <div class="legend-item" v-for="(segment, idx) in pieSegments" :key="idx">
+                    <span class="legend-color" :style="{ backgroundColor: segment.color }"></span>
+                    <span class="legend-code" :title="segment.code">{{ segment.code }}</span>
+                    <span class="legend-count">{{ segment.count.toLocaleString() }}</span>
+                    <span class="legend-percent">{{ segment.percentage.toFixed(1) }}%</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 错误趋势时间线 -->
+          <div class="error-timeline-section" v-if="errorAnalysis.error_timeline?.length">
+            <MetricTrendChart
+              title="错误趋势"
+              :value="latestErrorCount"
+              unit="errors"
+              :points="errorTimelinePoints"
+              field="error_count"
+              color="#ef4444"
+              :show-expand="true"
+              @expand="openExpandedChart('error_timeline')"
+            />
+          </div>
+        </div>
+
+        <!-- Top 错误信息 -->
+        <div class="top-errors-section" v-if="topErrorMessages.length">
+          <div class="error-chart-card">
+            <div class="error-chart-title">Top 错误信息</div>
+            <div class="top-errors-list">
+              <div class="top-error-item" v-for="(msg, idx) in topErrorMessages.slice(0, 10)" :key="idx">
+                <span class="rank">{{ idx + 1 }}</span>
+                <el-tooltip :content="msg.message" placement="top" :show-after="300">
+                  <span class="message">{{ msg.message }}</span>
+                </el-tooltip>
+                <span class="count">{{ msg.count.toLocaleString() }} 次</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -422,6 +561,42 @@
                 </div>
               </template>
             </el-alert>
+            <!-- 筛选栏 -->
+            <div class="error-filters-row">
+              <el-select
+                v-model="errorFilterCode"
+                placeholder="按响应码筛选"
+                clearable
+                size="small"
+                class="error-filter-select"
+                @change="errorPage = 1"
+              >
+                <el-option
+                  v-for="opt in errorCodeOptions"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                />
+              </el-select>
+              <el-select
+                v-model="errorFilterLabel"
+                placeholder="按请求名称筛选"
+                clearable
+                size="small"
+                class="error-filter-select"
+                @change="errorPage = 1"
+              >
+                <el-option
+                  v-for="opt in errorLabelOptions"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                />
+              </el-select>
+              <span class="error-filter-result" v-if="errorFilterCode || errorFilterLabel">
+                共 {{ filteredErrorRecordsRaw.length }} 条匹配记录
+              </span>
+            </div>
             <el-table :data="formatErrorRecords" style="width: 100%" v-loading="errorLoading">
               <el-table-column prop="timestamp" label="时间" width="170" />
               <el-table-column prop="source" label="来源节点" width="190" show-overflow-tooltip />
@@ -473,7 +648,7 @@
               v-model:current-page="errorPage"
               v-model:page-size="errorPageSize"
               :page-sizes="[50, 100, 200]"
-              :total="errorAnalysis.records?.length || 0"
+              :total="filteredErrorRecordsRaw.length"
               layout="total, sizes, prev, pager, next"
               class="error-pagination"
             />
@@ -796,7 +971,9 @@ import {
   Files,
   FullScreen,
   VideoPlay,
-  VideoPause
+  VideoPause,
+  TrendCharts,
+  StarFilled
 } from '@element-plus/icons-vue'
 import { executionApi } from '@/api/execution'
 import { formatDateTimeInShanghai, parseServerDateTime } from '@/utils/datetime'
@@ -839,6 +1016,10 @@ const selectedErrorType = ref(null)
 const responseDialogVisible = ref(false)
 const responseDialogRecord = ref({})
 
+// 错误筛选相关
+const errorFilterCode = ref('')
+const errorFilterLabel = ref('')
+
 // 报告全屏查看
 const reportFullscreen = ref(false)
 
@@ -846,6 +1027,10 @@ const reportFullscreen = ref(false)
 const errorDetailVisible = ref(false)
 const currentErrorRecord = ref(null)
 const errorDetailTab = ref('request')
+
+// 基准线对比相关
+const baselineComparison = ref(null)
+const baselineLoading = ref(false)
 
 const showErrorDetail = (record) => {
   currentErrorRecord.value = record
@@ -1073,11 +1258,40 @@ const detailStatGroups = computed(() => {
   ]
 })
 
-// 分页的错误记录
+// 筛选后的错误记录
+const filteredErrorRecordsRaw = computed(() => {
+  let records = errorAnalysis.value?.records || []
+  if (errorFilterCode.value) {
+    records = records.filter(r => r.response_code === errorFilterCode.value)
+  }
+  if (errorFilterLabel.value) {
+    records = records.filter(r => r.label === errorFilterLabel.value)
+  }
+  return records
+})
+
+// 筛选选项
+const errorCodeOptions = computed(() => {
+  const distribution = errorAnalysis.value?.response_code_distribution || []
+  return distribution.map(item => ({
+    label: `${item.code} (${item.count}次)`,
+    value: item.code
+  }))
+})
+
+const errorLabelOptions = computed(() => {
+  const types = errorAnalysis.value?.error_types || []
+  return types.map(item => ({
+    label: `${item.label} (${item.count}次)`,
+    value: item.label
+  }))
+})
+
+// 分页的错误记录（基于筛选后数据）
 const paginatedRecords = computed(() => {
-  if (!errorAnalysis.value?.records) return []
+  if (!filteredErrorRecordsRaw.value) return []
   const start = (errorPage.value - 1) * errorPageSize.value
-  return errorAnalysis.value.records.slice(start, start + errorPageSize.value)
+  return filteredErrorRecordsRaw.value.slice(start, start + errorPageSize.value)
 })
 
 // 格式化样例错误数据，处理 null/undefined/"null" 值
@@ -1096,6 +1310,57 @@ const formatErrorRecords = computed(() => {
     ...record,
     failure_message: formatFailureMessage(record.failure_message)
   }))
+})
+
+// 响应码颜色映射（用于饼图）
+const getResponseCodeColor = (code) => {
+  if (code?.startsWith('5')) return '#ef4444'  // 5xx 红色
+  if (code?.startsWith('4')) return '#f59e0b'  // 4xx 橙色
+  if (code?.includes('Exception') || code?.includes('error') || code?.includes('Non HTTP')) return '#a855f7'  // 连接错误 紫色
+  return '#6b7280'  // 其他灰色
+}
+
+// 饼图数据计算
+const pieSegments = computed(() => {
+  const distribution = errorAnalysis.value?.response_code_distribution || []
+  const radius = 40
+  const circumference = 2 * Math.PI * radius  // ≈ 251.2
+  let currentOffset = 0
+  return distribution.map(item => {
+    const length = (item.percentage / 100) * circumference
+    const segment = {
+      code: item.code,
+      count: item.count,
+      percentage: item.percentage,
+      color: getResponseCodeColor(item.code),
+      length,
+      offset: -currentOffset
+    }
+    currentOffset += length
+    return segment
+  })
+})
+
+// 错误趋势数据转换
+const errorTimelinePoints = computed(() => {
+  const timeline = errorAnalysis.value?.error_timeline || []
+  return timeline.map(p => ({
+    timestamp: p.minute,
+    error_count: p.error_count,
+    error_rate: p.error_rate
+  }))
+})
+
+// 最新错误数（用于趋势图标题）
+const latestErrorCount = computed(() => {
+  const timeline = errorAnalysis.value?.error_timeline || []
+  if (timeline.length === 0) return 0
+  return timeline[timeline.length - 1].error_count
+})
+
+// Top错误信息
+const topErrorMessages = computed(() => {
+  return errorAnalysis.value?.top_error_messages || []
 })
 
 const errorDetailNotice = computed(() => {
@@ -1218,6 +1483,19 @@ const formatNumber = (num) => {
   return n.toFixed(2).replace(/\.?0+$/, '')
 }
 
+const bytesKBPoints = computed(() => {
+  return (liveMetrics.value?.points || []).map(p => ({
+    ...p,
+    bytes_per_sec: (p.bytes_per_sec || 0) / 1024
+  }))
+})
+
+// 格式化字节速率为纯数值（用于图表显示）
+const formatBytesRateValue = (bytesPerSec) => {
+  if (bytesPerSec === null || bytesPerSec === undefined || bytesPerSec === 0) return '0'
+  return (bytesPerSec / 1024).toFixed(1)
+}
+
 // 格式化执行时长
 const formatDuration = (seconds) => {
   if (!seconds || seconds === 0) return '-'
@@ -1313,11 +1591,38 @@ const fetchExecutionDetail = async () => {
   try {
     const res = await executionApi.getDetail(executionId.value)
     execution.value = res.data || {}
+    // 加载完成后尝试加载基准线对比
+    if (execution.value.status === 'success' && !execution.value.is_baseline) {
+      loadBaselineComparison()
+    }
   } catch (error) {
     console.error('获取执行详情失败:', error)
   } finally {
     loading.value = false
     detailRefreshing.value = false
+  }
+}
+
+// 加载基准线对比数据
+const loadBaselineComparison = async () => {
+  if (!execution.value || execution.value.is_baseline) return
+  baselineLoading.value = true
+  try {
+    // 获取该脚本的执行列表，查找基准线
+    const listRes = await executionApi.getList({ 
+      script_id: execution.value.script_id, 
+      page_size: 100 
+    })
+    const baseline = (listRes.data?.list || []).find(e => e.is_baseline)
+    if (baseline && baseline.id !== execution.value.id) {
+      const res = await executionApi.compareExecutions(baseline.id, execution.value.id)
+      baselineComparison.value = res.data
+    }
+  } catch (err) {
+    console.warn('加载基准线对比失败', err)
+    baselineComparison.value = null
+  } finally {
+    baselineLoading.value = false
   }
 }
 
@@ -1414,6 +1719,30 @@ const expandedChartConfig = computed(() => {
       subline: `错误率 ${liveMetrics.value.error_rate !== undefined ? formatNumber(liveMetrics.value.error_rate) : '-'}%`,
       field: 'success_rate',
       color: '#84cc16'
+    },
+    p95_p99: {
+      title: 'P95/P99 响应时间',
+      value: formatNumber(primaryMetricValue('p95_rt')),
+      unit: 'ms',
+      subline: `P99: ${formatNumber(primaryMetricValue('p99_rt'))} ms`,
+      field: 'p95_rt',
+      color: '#f59e0b'
+    },
+    error_count: {
+      title: '错误数趋势',
+      value: String(primaryMetricValue('error_count') || 0),
+      unit: 'errors',
+      subline: '',
+      field: 'error_count',
+      color: '#ef4444'
+    },
+    bytes_per_sec: {
+      title: '网络吞吐量',
+      value: formatBytesRateValue(primaryMetricValue('bytes_per_sec')),
+      unit: 'KB/s',
+      subline: '',
+      field: 'bytes_per_sec',
+      color: '#22c55e'
     }
   }
   return configs[expandedChartKey.value] || null
@@ -1430,6 +1759,14 @@ const primaryMetricValue = (metricKey) => {
       return isExecutionRunning.value ? metrics.current_rt : metrics.avg_rt
     case 'concurrency':
       return isExecutionRunning.value ? metrics.current_concurrency : metrics.peak_concurrency
+    case 'p95_rt':
+      return metrics.p95_rt
+    case 'p99_rt':
+      return metrics.p99_rt
+    case 'error_count':
+      return metrics.error_count
+    case 'bytes_per_sec':
+      return metrics.bytes_per_sec
     default:
       return null
   }
@@ -1933,6 +2270,97 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
   gap: 18px;
+}
+
+// 基准线对比卡片
+.baseline-compare-card {
+  background: rgba(234, 179, 8, 0.08);
+  border: 1px solid rgba(234, 179, 8, 0.2);
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 20px;
+  
+  .baseline-header {
+    margin-bottom: 14px;
+    
+    .baseline-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      color: rgba(255, 255, 255, 0.9);
+      
+      .el-icon {
+        font-size: 16px;
+        color: #eab308;
+      }
+      
+      .baseline-tag {
+        background: rgba(234, 179, 8, 0.15);
+        border-color: rgba(234, 179, 8, 0.3);
+        color: #eab308;
+        margin-left: 4px;
+      }
+    }
+  }
+  
+  .baseline-metrics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  
+  .baseline-metric-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 10px 16px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.04);
+    min-width: 100px;
+    
+    .metric-name {
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.6);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    
+    .metric-change {
+      font-size: 16px;
+      font-weight: 700;
+      font-family: 'Consolas', 'Monaco', monospace;
+      color: rgba(255, 255, 255, 0.5);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      
+      .arrow-up {
+        color: #22c55e;
+        font-size: 12px;
+      }
+      
+      .arrow-down {
+        color: #ef4444;
+        font-size: 12px;
+      }
+      
+      .arrow-flat {
+        color: rgba(255, 255, 255, 0.3);
+        font-size: 12px;
+      }
+      
+      &.improved {
+        color: #22c55e;
+      }
+      
+      &.worsened {
+        color: #ef4444;
+      }
+    }
+  }
 }
 
 .live-metrics-summary {
@@ -2583,6 +3011,223 @@ onBeforeUnmount(() => {
     :deep(.el-pagination__total),
     :deep(.el-pagination__sizes) {
       color: var(--text-secondary);
+    }
+  }
+
+  // 错误分布图表行
+  .error-charts-row {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 20px;
+
+    @media (max-width: 900px) {
+      flex-direction: column;
+    }
+  }
+
+  .error-pie-section {
+    flex: 0 0 40%;
+    min-width: 320px;
+
+    @media (max-width: 900px) {
+      flex: 1;
+      min-width: auto;
+    }
+  }
+
+  .error-timeline-section {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .error-chart-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 12px;
+    padding: 16px;
+    height: 100%;
+  }
+
+  .error-chart-title {
+    font-size: 13px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 12px;
+  }
+
+  // 饼图样式
+  .error-pie-content {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+  }
+
+  .error-pie-chart {
+    width: 140px;
+    height: 140px;
+    flex-shrink: 0;
+
+    circle {
+      transition: stroke-dasharray 0.3s ease;
+    }
+
+    .pie-center-label {
+      fill: var(--text-secondary);
+      font-size: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .pie-center-value {
+      fill: var(--text-primary);
+      font-size: 14px;
+      font-weight: 700;
+      font-family: 'Consolas', 'Monaco', 'Fira Code', monospace;
+    }
+  }
+
+  .error-pie-legend {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 140px;
+    overflow-y: auto;
+
+    &::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    &::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 2px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+
+      .legend-color {
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+        flex-shrink: 0;
+      }
+
+      .legend-code {
+        color: var(--text-primary);
+        font-weight: 500;
+        min-width: 40px;
+        max-width: 80px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .legend-count {
+        color: var(--text-secondary);
+        flex: 1;
+        text-align: right;
+      }
+
+      .legend-percent {
+        color: var(--text-secondary);
+        min-width: 40px;
+        text-align: right;
+        font-family: 'Consolas', 'Monaco', 'Fira Code', monospace;
+      }
+    }
+  }
+
+  // Top 错误信息
+  .top-errors-section {
+    margin-bottom: 20px;
+
+    .top-errors-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .top-error-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      background: rgba(255, 255, 255, 0.02);
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.04);
+
+      .rank {
+        width: 22px;
+        height: 22px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(239, 68, 68, 0.15);
+        color: #ef4444;
+        font-size: 11px;
+        font-weight: 700;
+        border-radius: 4px;
+        flex-shrink: 0;
+      }
+
+      .message {
+        flex: 1;
+        color: var(--text-primary);
+        font-size: 13px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        cursor: default;
+      }
+
+      .count {
+        color: var(--text-secondary);
+        font-size: 12px;
+        font-family: 'Consolas', 'Monaco', 'Fira Code', monospace;
+        flex-shrink: 0;
+      }
+    }
+  }
+
+  // 错误筛选栏
+  .error-filters-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+
+    .error-filter-select {
+      width: 180px;
+
+      :deep(.el-input__wrapper) {
+        background: rgba(255, 255, 255, 0.05) !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        box-shadow: none !important;
+      }
+
+      :deep(.el-input__inner) {
+        color: var(--text-primary) !important;
+      }
+
+      :deep(.el-input__inner::placeholder) {
+        color: var(--text-secondary) !important;
+      }
+    }
+
+    .error-filter-result {
+      color: var(--text-secondary);
+      font-size: 12px;
+      margin-left: auto;
     }
   }
 

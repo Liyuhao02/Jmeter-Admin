@@ -43,3 +43,11 @@ func PageSuccess(total int64, list interface{}) Response {
 		},
 	}
 }
+
+func SuccessWithMsg(message string) Response {
+	return Response{
+		Code:    0,
+		Message: message,
+		Data:    nil,
+	}
+}

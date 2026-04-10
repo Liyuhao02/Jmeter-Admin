@@ -20,3 +20,13 @@ type ScriptFile struct {
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 }
+
+type ScriptVersion struct {
+	ID            int64  `json:"id"`
+	ScriptID      int64  `json:"script_id"`
+	VersionNumber int    `json:"version_number"`
+	Content       string `json:"content,omitempty"` // 列表时omit，详情时返回
+	ContentHash   string `json:"content_hash,omitempty"`
+	ChangeSummary string `json:"change_summary"`
+	CreatedAt     string `json:"created_at"`
+}

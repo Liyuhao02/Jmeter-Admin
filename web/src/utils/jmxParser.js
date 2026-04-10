@@ -1243,23 +1243,44 @@ export function parseJMX(xmlString) {
     // JMX 标准结构：根 hashTree 下应该只有一个 TestPlan
     // TestPlan 后面紧跟的 hashTree 包含它的子元素（线程组等）
     if (result.length > 1) {
-      // 查找 TestPlan 节点
-      const testPlanIndex = result.findIndex(n => n.testclass === 'TestPlan')
+      // 查找所有 TestPlan 节点
+      const testPlanIndices = result
+        .map((n, idx) => ({ node: n, index: idx }))
+        .filter(item => item.node.testclass === 'TestPlan')
+        .map(item => item.index)
       
-      if (testPlanIndex >= 0) {
-        const testPlan = result[testPlanIndex]
-        // 将其他顶层元素合并到 TestPlan 的 children 中
-        // 这些元素应该是 TestPlan 的子元素，但由于某种原因被错误地放在了顶层
+      if (testPlanIndices.length > 0) {
+        const firstTestPlanIndex = testPlanIndices[0]
+        const firstTestPlan = result[firstTestPlanIndex]
+        
+        // 如果存在多个 TestPlan，将后续 TestPlan 的 children 合并到第一个
+        if (testPlanIndices.length > 1) {
+          console.warn('检测到多个 TestPlan，已自动合并到第一个 TestPlan 中')
+          
+          for (let i = 1; i < testPlanIndices.length; i++) {
+            const otherTestPlan = result[testPlanIndices[i]]
+            // 将其他 TestPlan 的 children 合并到第一个 TestPlan
+            if (otherTestPlan.children && otherTestPlan.children.length > 0) {
+              otherTestPlan.children.forEach(child => {
+                if (!firstTestPlan.children.find(c => c.id === child.id)) {
+                  firstTestPlan.children.push(child)
+                }
+              })
+            }
+          }
+        }
+        
+        // 将其他顶层非 TestPlan 元素合并到第一个 TestPlan 的 children 中
         result.forEach((node, idx) => {
-          if (idx !== testPlanIndex && node.testclass !== 'TestPlan') {
+          if (idx !== firstTestPlanIndex && node.testclass !== 'TestPlan') {
             // 避免重复添加
-            if (!testPlan.children.find(c => c.id === node.id)) {
-              testPlan.children.push(node)
+            if (!firstTestPlan.children.find(c => c.id === node.id)) {
+              firstTestPlan.children.push(node)
             }
           }
         })
-        // 只返回 TestPlan
-        return [testPlan]
+        // 只返回第一个 TestPlan
+        return [firstTestPlan]
       }
     }
     

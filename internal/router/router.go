@@ -33,6 +33,9 @@ func SetupRouter(frontendFS embed.FS) *gin.Engine {
 			scripts.PUT("/:id/content", handler.SaveScriptContent)
 			scripts.POST("/:id/files", handler.UploadFiles)
 			scripts.DELETE("/:id/files/:fileId", handler.DeleteFile)
+			scripts.GET("/:id/versions", handler.GetScriptVersions)
+			scripts.GET("/:id/versions/:versionId", handler.GetScriptVersionContent)
+			scripts.POST("/:id/versions/:versionId/restore", handler.RestoreScriptVersion)
 		}
 
 		// Slaves 路由
@@ -50,16 +53,18 @@ func SetupRouter(frontendFS embed.FS) *gin.Engine {
 		executions := api.Group("/executions")
 		{
 			executions.GET("", handler.ListExecutions)
-			executions.GET("/stats", handler.GetExecutionStats) // 统计汇总API
+			executions.GET("/stats", handler.GetExecutionStats)   // 统计汇总API
+			executions.GET("/compare", handler.CompareExecutions) // 执行对比API（放在 /:id 之前）
 			executions.POST("", handler.CreateExecution)
 			executions.GET("/:id", handler.GetExecution)
 			executions.GET("/:id/live-metrics", handler.GetExecutionLiveMetrics)
+			executions.PUT("/:id/baseline", handler.SetBaseline)
 			executions.DELETE("/:id", handler.DeleteExecution)
 			executions.POST("/:id/stop", handler.StopExecution)
-				executions.GET("/:id/log", handler.GetExecutionLog)
-				executions.GET("/:id/errors", handler.GetExecutionErrors)
-				executions.POST("/:id/error-details/upload", handler.UploadExecutionErrorDetails)
-				executions.GET("/:id/download/jtl", handler.DownloadResultFile)
+			executions.GET("/:id/log", handler.GetExecutionLog)
+			executions.GET("/:id/errors", handler.GetExecutionErrors)
+			executions.POST("/:id/error-details/upload", handler.UploadExecutionErrorDetails)
+			executions.GET("/:id/download/jtl", handler.DownloadResultFile)
 			executions.GET("/:id/download/report", handler.DownloadReport)
 			executions.GET("/:id/download/errors", handler.ExportErrors)
 			executions.GET("/:id/download/all", handler.DownloadAll)

@@ -13,6 +13,7 @@ frontend:
 jmeter:
   path: "jmeter"                      # JMeter 可执行文件路径（需在 PATH 中或使用绝对路径）
   master_hostname: "192.168.62.225"   # Master 节点 IP（多网卡时必填，可在页面动态配置）
+  agent_csv_data_dir: "/opt/jmeter/csv-data"  # Slave Agent 的 CSV 数据目录
 
 # Slave 节点配置
 slave:

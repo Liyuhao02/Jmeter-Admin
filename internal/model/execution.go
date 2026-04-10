@@ -14,5 +14,6 @@ type Execution struct {
 	ReportPath  string `json:"report_path"`
 	SummaryData string `json:"summary_data"` // JSON对象
 	LogPath     string `json:"log_path"`
+	IsBaseline  bool   `json:"is_baseline"` // 是否为基准线
 	CreatedAt   string `json:"created_at"`
 }
