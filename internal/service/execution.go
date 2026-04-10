@@ -3,7 +3,6 @@ package service
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/csv"
@@ -22,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -51,7 +51,7 @@ func isRequestSample(url string) bool {
 // 全局进程管理器，用于存储正在执行的命令
 type executionProcessGroup struct {
 	Commands []*exec.Cmd
-	Cancel   context.CancelFunc
+	Cancel   func() // 取消超时 timer 的函数
 }
 
 var executionProcesses sync.Map
@@ -531,32 +531,7 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 
 	// 6. 启动 goroutine 异步执行（带 4 小时超时保护）
 	go func() {
-		// 创建带超时的 context
-		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
-		defer cancel()
-
-		processGroup := &executionProcessGroup{Cancel: cancel}
-		commands := make([]*exec.Cmd, 0, 2)
-		logPrefix := fmt.Sprintf("[执行 #%d]", execID)
-		if len(localArgs) > 0 {
-			fmt.Printf("%s 本地命令: %s %s\n", logPrefix, jmeterPath, strings.Join(localArgs, " "))
-			cmd := exec.CommandContext(ctx, jmeterPath, localArgs...)
-			cmd.Env = append(os.Environ(), "JVM_ARGS="+jvmArgs)
-			setProcessGroup(cmd)
-			commands = append(commands, cmd)
-		}
-		if len(remoteArgs) > 0 {
-			fmt.Printf("%s 分布式命令: %s %s\n", logPrefix, jmeterPath, strings.Join(remoteArgs, " "))
-			cmd := exec.CommandContext(ctx, jmeterPath, remoteArgs...)
-			cmd.Env = append(os.Environ(), "JVM_ARGS="+jvmArgs)
-			setProcessGroup(cmd)
-			commands = append(commands, cmd)
-		}
-		processGroup.Commands = commands
-		executionProcesses.Store(execID, processGroup)
-		defer executionProcesses.Delete(execID)
-
-		// 创建日志文件
+		// 创建日志文件（必须在 timeoutTimer 之前，因为回调需要引用它）
 		logFile, err := os.Create(logPath)
 		if err != nil {
 			updateExecutionStatus(execID, "failed", "")
@@ -564,8 +539,49 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 		}
 		defer logFile.Close()
 
-		// 用于检测超时的 channel
-		done := make(chan struct{})
+		// 构建命令列表（必须在 timeoutTimer 之前，因为回调需要引用它）
+		commands := make([]*exec.Cmd, 0, 2)
+		logPrefix := fmt.Sprintf("[执行 #%d]", execID)
+		if len(localArgs) > 0 {
+			fmt.Printf("%s 本地命令: %s %s\n", logPrefix, jmeterPath, strings.Join(localArgs, " "))
+			cmd := exec.Command(jmeterPath, localArgs...)
+			cmd.Env = append(os.Environ(), "JVM_ARGS="+jvmArgs)
+			setProcessGroup(cmd)
+			commands = append(commands, cmd)
+		}
+		if len(remoteArgs) > 0 {
+			fmt.Printf("%s 分布式命令: %s %s\n", logPrefix, jmeterPath, strings.Join(remoteArgs, " "))
+			cmd := exec.Command(jmeterPath, remoteArgs...)
+			cmd.Env = append(os.Environ(), "JVM_ARGS="+jvmArgs)
+			setProcessGroup(cmd)
+			commands = append(commands, cmd)
+		}
+
+		// 超时保护：使用 AfterFunc，在超时时杀进程
+		var timedOut int32 // atomic 标志位
+		timeoutTimer := time.AfterFunc(4*time.Hour, func() {
+			if atomic.CompareAndSwapInt32(&timedOut, 0, 1) {
+				fmt.Fprintf(logFile, "[执行 #%d] 执行超时（超过4小时），强制终止\n", execID)
+				for _, cmd := range commands {
+					killProcessGroup(cmd)
+				}
+				endTime := time.Now().Format("2006-01-02 15:04:05")
+				database.DB.Exec(
+					"UPDATE executions SET status = ?, end_time = ?, remarks = ? WHERE id = ?",
+					"timeout", endTime, "执行超时（超过4小时）", execID,
+				)
+			}
+		})
+
+		processGroup := &executionProcessGroup{
+			Commands: commands,
+			Cancel: func() {
+				timeoutTimer.Stop()
+			},
+		}
+		executionProcesses.Store(execID, processGroup)
+		defer executionProcesses.Delete(execID)
+
 		var execErr error
 
 		runCommand := func(cmd *exec.Cmd) error {
@@ -574,81 +590,62 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 			return cmd.Run()
 		}
 
-		// 在单独的 goroutine 中执行命令
-		go func() {
-			defer close(done)
+		// 直接在当前 goroutine 中执行（不需要内层 goroutine）
+		switch len(commands) {
+		case 0:
+			execErr = fmt.Errorf("未生成可执行的 JMeter 命令")
+		case 1:
+			execErr = runCommand(commands[0])
+		default:
+			// 分布式+本地并行执行
+			var localErr, remoteErr error
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				localErr = runCommand(commands[0])
+			}()
+			go func() {
+				defer wg.Done()
+				remoteErr = runCommand(commands[1])
+			}()
+			wg.Wait()
 
-			var localErr error
-			var remoteErr error
-			switch len(commands) {
-			case 0:
-				execErr = fmt.Errorf("未生成可执行的 JMeter 命令")
-			case 1:
-				execErr = runCommand(commands[0])
-			default:
-				var wg sync.WaitGroup
-				wg.Add(2)
-				go func() {
-					defer wg.Done()
-					localErr = runCommand(commands[0])
-				}()
-				go func() {
-					defer wg.Done()
-					remoteErr = runCommand(commands[1])
-				}()
-				wg.Wait()
-				if mergeErr := mergeJTLFiles([]string{localResultPath, remoteResultPath}, resultPath); mergeErr != nil {
-					fmt.Fprintf(logFile, "[执行 #%d] 合并本地与分布式结果失败: %v\n", execID, mergeErr)
-					if execErr == nil {
-						execErr = mergeErr
-					}
-				} else {
-					reportArgs := []string{"-g", resultPath, "-o", reportPath}
-					reportCmd := exec.Command(jmeterPath, reportArgs...)
-					reportCmd.Env = append(os.Environ(), "JVM_ARGS="+jvmArgs)
-					setProcessGroup(reportCmd)
-					reportCmd.Stdout = logFile
-					reportCmd.Stderr = logFile
-					if reportErr := reportCmd.Run(); reportErr != nil {
-						fmt.Fprintf(logFile, "[执行 #%d] 生成合并报告失败: %v\n", execID, reportErr)
-					}
+			// JTL 合并、报告生成等后续处理
+			if mergeErr := mergeJTLFiles([]string{localResultPath, remoteResultPath}, resultPath); mergeErr != nil {
+				fmt.Fprintf(logFile, "[执行 #%d] 合并本地与分布式结果失败: %v\n", execID, mergeErr)
+				if execErr == nil {
+					execErr = mergeErr
 				}
-				if localErr != nil || remoteErr != nil {
-					errMessages := make([]string, 0, 2)
-					if localErr != nil {
-						errMessages = append(errMessages, "本地执行失败: "+localErr.Error())
-					}
-					if remoteErr != nil {
-						errMessages = append(errMessages, "分布式执行失败: "+remoteErr.Error())
-					}
-					execErr = fmt.Errorf("%s", strings.Join(errMessages, "; "))
+			} else {
+				reportArgs := []string{"-g", resultPath, "-o", reportPath}
+				reportCmd := exec.Command(jmeterPath, reportArgs...)
+				reportCmd.Env = append(os.Environ(), "JVM_ARGS="+jvmArgs)
+				setProcessGroup(reportCmd)
+				reportCmd.Stdout = logFile
+				reportCmd.Stderr = logFile
+				if reportErr := reportCmd.Run(); reportErr != nil {
+					fmt.Fprintf(logFile, "[执行 #%d] 生成合并报告失败: %v\n", execID, reportErr)
 				}
 			}
-		}()
-
-		// 等待命令完成或超时
-		select {
-		case <-done:
-			// 正常完成
-			err = execErr
-		case <-ctx.Done():
-			// 超时或被取消
-			if ctx.Err() == context.DeadlineExceeded {
-				fmt.Fprintf(logFile, "[执行 #%d] 执行超时（超过4小时），强制终止\n", execID)
-				// 强制杀死进程组
-				for _, cmd := range commands {
-					killProcessGroup(cmd)
+			if localErr != nil || remoteErr != nil {
+				errMessages := make([]string, 0, 2)
+				if localErr != nil {
+					errMessages = append(errMessages, "本地执行失败: "+localErr.Error())
 				}
-				// 更新状态为 timeout
-				endTime := time.Now().Format("2006-01-02 15:04:05")
-				_, _ = database.DB.Exec(
-					"UPDATE executions SET status = ?, end_time = ?, remarks = ? WHERE id = ?",
-					"timeout", endTime, "执行超时（超过4小时）", execID,
-				)
-				return
+				if remoteErr != nil {
+					errMessages = append(errMessages, "分布式执行失败: "+remoteErr.Error())
+				}
+				execErr = fmt.Errorf("%s", strings.Join(errMessages, "; "))
 			}
-			// 被取消（手动停止）
-			err = fmt.Errorf("执行被取消")
+		}
+
+		// 停止超时 timer（如果还没触发）
+		timeoutTimer.Stop()
+
+		// 检查是否已被超时标记
+		if atomic.LoadInt32(&timedOut) == 1 {
+			return // 超时已处理，不再更新状态
 		}
 
 		// 7. 命令完成后解析结果
@@ -661,7 +658,7 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 
 		// 更新执行状态
 		status := "success"
-		if err != nil {
+		if execErr != nil {
 			status = "failed"
 		}
 		updateExecutionStatus(execID, status, summaryData)

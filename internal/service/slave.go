@@ -21,7 +21,7 @@ import (
 
 // ListSlaves 查询所有slave列表
 func ListSlaves() ([]model.Slave, error) {
-	rows, err := database.DB.Query("SELECT id, name, host, port, status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, agent_uptime, created_at FROM slaves ORDER BY id DESC")
+	rows, err := database.DB.Query("SELECT id, name, host, port, status, agent_status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, agent_uptime, created_at FROM slaves ORDER BY id DESC")
 	if err != nil {
 		return nil, fmt.Errorf("查询slave列表失败: %w", err)
 	}
@@ -33,7 +33,8 @@ func ListSlaves() ([]model.Slave, error) {
 		var lastCheckTime sql.NullString
 		var agentCheckTime sql.NullString
 		var systemStats sql.NullString
-		if err := rows.Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &slave.AgentUptime, &slave.CreatedAt); err != nil {
+		var agentStatus sql.NullString
+		if err := rows.Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &agentStatus, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &slave.AgentUptime, &slave.CreatedAt); err != nil {
 			return nil, fmt.Errorf("扫描slave数据失败: %w", err)
 		}
 		if lastCheckTime.Valid {
@@ -44,6 +45,11 @@ func ListSlaves() ([]model.Slave, error) {
 		}
 		if systemStats.Valid {
 			slave.SystemStats = systemStats.String
+		}
+		if agentStatus.Valid {
+			slave.AgentStatus = agentStatus.String
+		} else {
+			slave.AgentStatus = "unknown"
 		}
 		slaves = append(slaves, slave)
 	}
@@ -133,10 +139,11 @@ func CheckSlave(id int64) (bool, error) {
 	var lastCheckTime sql.NullString
 	var agentCheckTime sql.NullString
 	var systemStats sql.NullString
+	var agentStatus sql.NullString
 	err := database.DB.QueryRow(
-		"SELECT id, name, host, port, status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, agent_uptime, created_at FROM slaves WHERE id = ?",
+		"SELECT id, name, host, port, status, agent_status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, agent_uptime, created_at FROM slaves WHERE id = ?",
 		id,
-	).Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &slave.AgentUptime, &slave.CreatedAt)
+	).Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &agentStatus, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &slave.AgentUptime, &slave.CreatedAt)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -152,6 +159,11 @@ func CheckSlave(id int64) (bool, error) {
 	}
 	if systemStats.Valid {
 		slave.SystemStats = systemStats.String
+	}
+	if agentStatus.Valid {
+		slave.AgentStatus = agentStatus.String
+	} else {
+		slave.AgentStatus = "unknown"
 	}
 
 	// 检测 JMeter RMI 连通性
@@ -380,10 +392,11 @@ func CheckSlaveBoth(id int64) (DiagnosticResult, error) {
 	var lastCheckTime sql.NullString
 	var agentCheckTime sql.NullString
 	var systemStats sql.NullString
+	var agentStatus sql.NullString
 	err := database.DB.QueryRow(
-		"SELECT id, name, host, port, status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, agent_uptime, created_at FROM slaves WHERE id = ?",
+		"SELECT id, name, host, port, status, agent_status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, agent_uptime, created_at FROM slaves WHERE id = ?",
 		id,
-	).Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &slave.AgentUptime, &slave.CreatedAt)
+	).Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &agentStatus, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &slave.AgentUptime, &slave.CreatedAt)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -399,6 +412,11 @@ func CheckSlaveBoth(id int64) (DiagnosticResult, error) {
 	}
 	if systemStats.Valid {
 		slave.SystemStats = systemStats.String
+	}
+	if agentStatus.Valid {
+		slave.AgentStatus = agentStatus.String
+	} else {
+		slave.AgentStatus = "unknown"
 	}
 
 	// 检测 JMeter RMI 连通性
@@ -429,14 +447,14 @@ func CheckSlaveBoth(id int64) (DiagnosticResult, error) {
 	if result.JMeterOnline {
 		jmeterStatus = "online"
 	}
-	agentStatus := "offline"
+	newAgentStatus := "offline"
 	if result.AgentOnline {
-		agentStatus = "online"
+		newAgentStatus = "online"
 	}
 
 	_, err = database.DB.Exec(
 		"UPDATE slaves SET status = ?, agent_status = ?, last_check_time = ?, agent_check_time = ?, system_stats = ?, agent_uptime = ? WHERE id = ?",
-		jmeterStatus, agentStatus, now, now, agentResult.SystemStats, agentResult.AgentUptime, id,
+		jmeterStatus, newAgentStatus, now, now, agentResult.SystemStats, agentResult.AgentUptime, id,
 	)
 	if err != nil {
 		return result, fmt.Errorf("更新slave状态失败: %w", err)

@@ -139,6 +139,7 @@
 
       <!-- 执行记录表格 -->
       <el-table
+        ref="tableRef"
         v-loading="tableLoading"
         :data="executionList"
         class="executions-table"
@@ -377,7 +378,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { 
@@ -414,8 +415,13 @@ const nowTick = ref(Date.now())
 const liveMetricsMap = ref({})
 const LIST_REFRESH_INTERVAL = 3000
 
+// el-table ref
+const tableRef = ref(null)
+
 // 选中的执行（用于对比）
 const selectedExecutions = ref([])
+// 存储选中的执行 ID（用于刷新后恢复选择状态）
+const selectedIds = ref(new Set())
 
 // 对比弹窗相关
 const compareDialogVisible = ref(false)
@@ -458,6 +464,7 @@ const hasRunning = computed(() => {
 // 处理表格选择变化
 const handleSelectionChange = (val) => {
   selectedExecutions.value = val
+  selectedIds.value = new Set(val.map(item => item.id))
 }
 
 // 切换基准线
@@ -720,6 +727,19 @@ const fetchExecutions = async () => {
     executionList.value = res.data?.list || []
     pagination.value.total = res.data?.total || 0
     await hydrateRunningMetrics(executionList.value)
+
+    // 恢复选中状态
+    if (selectedIds.value.size > 0) {
+      nextTick(() => {
+        if (tableRef.value) {
+          executionList.value.forEach(row => {
+            if (selectedIds.value.has(row.id)) {
+              tableRef.value.toggleRowSelection(row, true)
+            }
+          })
+        }
+      })
+    }
   } catch (error) {
     console.error('获取执行列表失败:', error)
   } finally {

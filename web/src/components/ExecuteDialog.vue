@@ -90,59 +90,59 @@
         />
       </div>
 
-      <div class="detail-section">
-        <div class="detail-switch-row">
-          <div class="detail-copy">
-            <div class="section-label">失败请求明细</div>
-            <div class="detail-desc">
-              保存失败样本的请求头、请求体、响应头和响应体，执行结果页可直接查看对应 HTTP 信息。
+      <!-- 执行选项 -->
+      <div class="options-section">
+        <div class="section-label">执行选项</div>
+        <div class="compact-options">
+          <div class="option-row">
+            <div class="option-info">
+              <span class="option-title">失败请求明细</span>
+              <el-tooltip content="保存失败样本的请求头、请求体、响应头和响应体，执行结果页可直接查看对应 HTTP 信息。" placement="top">
+                <el-icon class="help-icon"><InfoFilled /></el-icon>
+              </el-tooltip>
             </div>
+            <el-switch
+              v-model="saveHTTPDetails"
+              inline-prompt
+              active-text="开启"
+              inactive-text="关闭"
+              size="small"
+            />
           </div>
-          <el-switch
-            v-model="saveHTTPDetails"
-            inline-prompt
-            active-text="开启"
-            inactive-text="关闭"
-          />
-        </div>
-        <div v-if="executionMode === 'distributed'" class="detail-notice">
-          分布式模式会由各 Slave 本地收集失败明细，并在执行结束后自动回传到 Master。
-        </div>
-      </div>
 
-      <div v-if="executionMode === 'distributed'" class="detail-section">
-        <div class="detail-switch-row">
-          <div class="detail-copy">
-            <div class="section-label">Master 参与执行</div>
-            <div class="detail-desc">
-              开启后会同时在当前服务器和所选 Slave 上执行同一脚本，结果会自动合并到同一条执行记录。
+          <div v-if="executionMode === 'distributed'" class="option-row">
+            <div class="option-info">
+              <span class="option-title">Master 参与执行</span>
+              <el-tooltip content="开启后会同时在当前服务器和所选 Slave 上执行同一脚本，结果会自动合并到同一条执行记录。" placement="top">
+                <el-icon class="help-icon"><InfoFilled /></el-icon>
+              </el-tooltip>
             </div>
+            <el-switch
+              v-model="includeMaster"
+              inline-prompt
+              active-text="参与"
+              inactive-text="仅调度"
+              size="small"
+            />
           </div>
-          <el-switch
-            v-model="includeMaster"
-            inline-prompt
-            active-text="参与"
-            inactive-text="仅调度"
-          />
-        </div>
-      </div>
 
-      <div v-if="executionMode === 'distributed'" class="detail-section">
-        <div class="detail-switch-row">
-          <div class="detail-copy">
-            <div class="section-label">CSV 数据分片</div>
-            <div class="detail-desc">
-              分布式模式下自动将 CSV 文件按节点数均匀拆分，每个节点只读取属于自己的那部分数据，避免 token/参数重复消费。
+          <div v-if="executionMode === 'distributed'" class="option-row">
+            <div class="option-info">
+              <span class="option-title">CSV 数据分片</span>
+              <el-tooltip content="分布式模式下自动将 CSV 文件按节点数均匀拆分，每个节点只读取属于自己的那部分数据，避免 token/参数重复消费。" placement="top">
+                <el-icon class="help-icon"><InfoFilled /></el-icon>
+              </el-tooltip>
             </div>
+            <el-switch
+              v-model="splitCSV"
+              inline-prompt
+              active-text="开启"
+              inactive-text="关闭"
+              size="small"
+            />
           </div>
-          <el-switch
-            v-model="splitCSV"
-            inline-prompt
-            active-text="开启"
-            inactive-text="关闭"
-          />
         </div>
-        <div v-if="splitCSV" class="detail-notice">
+        <div v-if="splitCSV && executionMode === 'distributed'" class="detail-notice compact">
           执行前将自动拆分脚本中引用的 CSV 文件，并通过 Agent 分发到各 Slave 节点。请确保所有 Slave 的 Agent 服务已启动。
         </div>
       </div>
@@ -610,40 +610,69 @@ const handleExecute = async () => {
   gap: 12px;
 }
 
-.detail-section {
+// 执行选项区域
+.options-section {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 16px 18px;
+}
+
+.compact-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: var(--radius-md);
 }
 
-.detail-switch-row {
+.option-row {
   display: flex;
-  align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+
+  &:last-child {
+    border-bottom: none;
+  }
 }
 
-.detail-copy {
+.option-info {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 6px;
 }
 
-.detail-desc {
-  font-size: 12px;
-  line-height: 1.6;
+.option-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.help-icon {
+  font-size: 14px;
   color: var(--text-secondary);
-  max-width: 380px;
+  cursor: help;
+
+  &:hover {
+    color: var(--accent-blue);
+  }
 }
 
 .detail-notice {
   font-size: 12px;
   line-height: 1.6;
   color: #f7c46c;
+
+  &.compact {
+    margin-top: 4px;
+    padding: 8px 12px;
+    background: rgba(247, 196, 108, 0.08);
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+  }
 }
 
 .remarks-input {

@@ -128,82 +128,67 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="CPU" width="120" sortable :sort-method="(a,b) => sortByStats(a,b,'cpu')">
+        <el-table-column label="资源使用" width="180" sortable :sort-method="(a,b) => sortByStats(a,b,'cpu')">
           <template #default="{ row }">
-            <div v-if="row.parsedStats?.cpu" style="display:flex;align-items:center;gap:6px">
-              <el-progress
-                :percentage="row.parsedStats.cpu.percent"
-                :stroke-width="6"
-                :color="getResourceColor(row.parsedStats.cpu.percent, 80)"
-                :show-text="false"
-                style="flex:1"
-              />
-              <span style="font-size:12px;min-width:40px;text-align:right">
-                {{ row.parsedStats.cpu.percent.toFixed(1) }}%
-              </span>
+            <div v-if="row.parsedStats" class="resource-cell">
+              <div class="resource-row">
+                <span class="resource-label">CPU</span>
+                <el-progress
+                  :percentage="row.parsedStats.cpu?.percent || 0"
+                  :stroke-width="4"
+                  :color="getResourceColor(row.parsedStats.cpu?.percent || 0, 80)"
+                  :show-text="false"
+                  class="resource-progress"
+                />
+                <span class="resource-value">{{ (row.parsedStats.cpu?.percent || 0).toFixed(0) }}%</span>
+              </div>
+              <div class="resource-row">
+                <span class="resource-label">内存</span>
+                <el-progress
+                  :percentage="row.parsedStats.memory?.percent || 0"
+                  :stroke-width="4"
+                  :color="getResourceColor(row.parsedStats.memory?.percent || 0, 85)"
+                  :show-text="false"
+                  class="resource-progress"
+                />
+                <span class="resource-value">{{ (row.parsedStats.memory?.percent || 0).toFixed(0) }}%</span>
+              </div>
+              <div class="resource-row">
+                <span class="resource-label">磁盘</span>
+                <el-progress
+                  :percentage="row.parsedStats.disk?.percent || 0"
+                  :stroke-width="4"
+                  :color="getResourceColor(row.parsedStats.disk?.percent || 0, 90)"
+                  :show-text="false"
+                  class="resource-progress"
+                />
+                <span class="resource-value">{{ (row.parsedStats.disk?.percent || 0).toFixed(0) }}%</span>
+              </div>
             </div>
-            <span v-else style="color:#666">--</span>
+            <span v-else class="no-data">--</span>
           </template>
         </el-table-column>
-        <el-table-column label="内存" width="120" sortable :sort-method="(a,b) => sortByStats(a,b,'memory')">
-          <template #default="{ row }">
-            <div v-if="row.parsedStats?.memory" style="display:flex;align-items:center;gap:6px">
-              <el-progress
-                :percentage="row.parsedStats.memory.percent"
-                :stroke-width="6"
-                :color="getResourceColor(row.parsedStats.memory.percent, 85)"
-                :show-text="false"
-                style="flex:1"
-              />
-              <span style="font-size:12px;min-width:40px;text-align:right">
-                {{ row.parsedStats.memory.percent.toFixed(1) }}%
-              </span>
-            </div>
-            <span v-else style="color:#666">--</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="磁盘" width="120" sortable :sort-method="(a,b) => sortByStats(a,b,'disk')">
-          <template #default="{ row }">
-            <div v-if="row.parsedStats?.disk" style="display:flex;align-items:center;gap:6px">
-              <el-progress
-                :percentage="row.parsedStats.disk.percent"
-                :stroke-width="6"
-                :color="getResourceColor(row.parsedStats.disk.percent, 90)"
-                :show-text="false"
-                style="flex:1"
-              />
-              <span style="font-size:12px;min-width:40px;text-align:right">
-                {{ row.parsedStats.disk.percent.toFixed(1) }}%
-              </span>
-            </div>
-            <span v-else style="color:#666">--</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="最后检测" width="140" align="center">
+        <el-table-column label="最后检测" width="120" align="center">
           <template #default="{ row }">
             <span class="time-text" :title="row.last_check_time">
               {{ formatRelativeTime(row.last_check_time) }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="创建时间" width="160">
-          <template #default="{ row }">
-            <span class="time-text">{{ formatTime(row.created_at) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="320" fixed="right">
+        <el-table-column label="操作" width="160" fixed="right">
           <template #default="{ row }">
             <div class="action-btns">
-              <el-button
-                link
-                type="primary"
-                @click="handleCheck(row)"
-                :loading="checkingId === row.id"
-                class="action-btn check-btn"
-              >
-                <el-icon><CircleCheck /></el-icon>
-                检测
-              </el-button>
+              <el-tooltip content="检测连通性" placement="top">
+                <el-button
+                  link
+                  type="primary"
+                  @click="handleCheck(row)"
+                  :loading="checkingId === row.id"
+                  class="action-btn icon-btn"
+                >
+                  <el-icon><CircleCheck /></el-icon>
+                </el-button>
+              </el-tooltip>
               <el-popover
                 v-if="row.diagnostic && (row.diagnostic.jmeter_error || row.diagnostic.agent_error)"
                 placement="top"
@@ -212,9 +197,8 @@
                 popper-class="diagnostic-popover"
               >
                 <template #reference>
-                  <el-button link type="warning" class="action-btn diagnostic-btn">
+                  <el-button link type="warning" class="action-btn icon-btn diagnostic-btn">
                     <el-icon><WarningFilled /></el-icon>
-                    诊断
                   </el-button>
                 </template>
                 <div class="diagnostic-panel">
@@ -242,34 +226,37 @@
                   </div>
                 </div>
               </el-popover>
-              <el-button
-                link
-                type="primary"
-                @click="handleEdit(row)"
-                class="action-btn edit-btn"
-              >
-                <el-icon><Edit /></el-icon>
-                编辑
-              </el-button>
-              <el-button
-                link
-                type="danger"
-                @click="handleDelete(row)"
-                class="action-btn delete-btn"
-              >
-                <el-icon><Delete /></el-icon>
-                删除
-              </el-button>
-              <el-button
-                link
-                type="info"
-                @click="showStatsDialog(row)"
-                :disabled="!row.parsedStats"
-                class="action-btn stats-btn"
-              >
-                <el-icon><InfoFilled /></el-icon>
-                资源
-              </el-button>
+              <el-tooltip content="编辑节点" placement="top">
+                <el-button
+                  link
+                  type="primary"
+                  @click="handleEdit(row)"
+                  class="action-btn icon-btn edit-btn"
+                >
+                  <el-icon><Edit /></el-icon>
+                </el-button>
+              </el-tooltip>
+              <el-tooltip content="删除节点" placement="top">
+                <el-button
+                  link
+                  type="danger"
+                  @click="handleDelete(row)"
+                  class="action-btn icon-btn delete-btn"
+                >
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </el-tooltip>
+              <el-tooltip content="资源详情" placement="top">
+                <el-button
+                  link
+                  type="info"
+                  @click="showStatsDialog(row)"
+                  :disabled="!row.parsedStats"
+                  class="action-btn icon-btn stats-btn"
+                >
+                  <el-icon><InfoFilled /></el-icon>
+                </el-button>
+              </el-tooltip>
             </div>
           </template>
         </el-table-column>
@@ -1259,19 +1246,66 @@ onUnmounted(() => {
     }
   }
 
+  // 资源使用列样式
+  .resource-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 0;
+
+    .resource-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .resource-label {
+      width: 28px;
+      color: var(--text-secondary);
+      flex-shrink: 0;
+    }
+
+    .resource-progress {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .resource-value {
+      min-width: 32px;
+      text-align: right;
+      color: var(--text-primary);
+      font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+    }
+  }
+
+  .no-data {
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
   .action-btns {
     display: flex;
-    gap: 4px;
+    gap: 2px;
     flex-wrap: nowrap;
     overflow: hidden;
+    justify-content: flex-start;
 
     .action-btn {
-      padding: 4px 8px;
+      padding: 4px 6px;
       font-size: 13px;
 
       .el-icon {
-        margin-right: 4px;
-        font-size: 14px;
+        font-size: 16px;
+      }
+
+      &.icon-btn {
+        padding: 6px;
+
+        .el-icon {
+          margin-right: 0;
+        }
       }
     }
 
@@ -1292,8 +1326,12 @@ onUnmounted(() => {
       color: var(--text-secondary) !important;
     }
 
-    .stats-btn:hover {
+    .stats-btn:hover:not(:disabled) {
       color: var(--accent-blue) !important;
+    }
+
+    .stats-btn:disabled {
+      opacity: 0.4;
     }
   }
 }
