@@ -14,6 +14,9 @@
 - [internal/service/execution.go](file://internal/service/execution.go)
 - [internal/service/slave.go](file://internal/service/slave.go)
 - [internal/service/csv_split.go](file://internal/service/csv_split.go)
+- [internal/service/execution_diagnostics.go](file://internal/service/execution_diagnostics.go)
+- [internal/service/execution_environment.go](file://internal/service/execution_environment.go)
+- [internal/service/agent_client.go](file://internal/service/agent_client.go)
 - [internal/handler/execution.go](file://internal/handler/execution.go)
 - [internal/handler/slave.go](file://internal/handler/slave.go)
 - [README.md](file://README.md)
@@ -34,12 +37,17 @@
 
 JMeter Admin是一个基于Go语言开发的分布式JMeter压力测试管理系统，采用Go (Gin) + Vue 3 (Element Plus) + SQLite技术栈构建。该系统提供了完整的JMeter分布式压测管理功能，包括脚本管理、Slave节点管理、Agent节点服务、CSV自动拆分分发、分布式压测执行等核心功能。
 
+**更新** 系统现已增强Agent诊断能力，新增网络回调检查、环境报告、手动JMeter路径指定等高级功能，显著提升了系统的可观测性和运维效率。
+
 系统的核心特点包括：
 - 单文件部署的分布式压测管理平台
 - 轻量级的Agent节点服务，提供文件分发和系统监控能力
 - 自动化的CSV文件拆分和分发机制
 - 实时监控和错误分析功能
 - 支持本地模式和分布式模式的压测执行
+- **新增** 增强的Agent诊断和环境一致性检查能力
+- **新增** 网络回调可达性检查功能
+- **新增** 手动JMeter路径指定和环境报告功能
 
 ## 项目结构
 
@@ -144,20 +152,23 @@ MainApplication --> RouterManager : "使用"
 
 ### Agent节点服务组件
 
-Agent服务是运行在每个Slave节点上的轻量级辅助服务：
+**更新** Agent服务现已增强，新增网络回调检查和环境报告功能：
 
 ```mermaid
 classDiagram
 class AgentServer {
 -dataDir string
 -token string
+-jmeterPath string
 -mux *http.ServeMux
-+NewServer(dataDir, token) *AgentServer
++NewServer(dataDir, token, jmeterPath) *AgentServer
 +setupRoutes() void
 +Start(addr string) error
 +handleHealth() void
 +handleUpload() void
 +handleFileOperations() void
++handleCheckCallback() void
++handleEnvironmentReport() void
 }
 class SystemStats {
 +CPU CPUStats
@@ -169,13 +180,24 @@ class FileOperation {
 +isValidFilename(filename string) bool
 +writeJSON(w, status, data) void
 }
+class EnvironmentReport {
+-AgentVersion string
+-JMeterPath string
+-JMeterHome string
+-JMeterVersion string
+-PluginJars []string
+-PropertiesLines []string
+-Warnings []string
+}
 AgentServer --> SystemStats : "收集"
 AgentServer --> FileOperation : "使用"
+AgentServer --> EnvironmentReport : "生成"
 ```
 
 **图表来源**
 - [internal/agent/server.go:89-113](file://internal/agent/server.go#L89-L113)
-- [internal/agent/server.go:25-87](file://internal/agent/server.go#L25-L87)
+- [internal/agent/server.go:153-175](file://internal/agent/server.go#L153-L175)
+- [internal/agent/server.go:375-423](file://internal/agent/server.go#L375-L423)
 
 **章节来源**
 - [main.go:28-66](file://main.go#L28-L66)
@@ -201,6 +223,8 @@ ExecutionSvc[执行服务]
 SlaveSvc[节点服务]
 CSVService[CSV处理服务]
 AgentClient[Agent客户端]
+EnvService[环境服务]
+DiagService[诊断服务]
 end
 subgraph "数据持久层"
 SQLite[(SQLite数据库)]
@@ -210,13 +234,15 @@ subgraph "外部系统"
 JMeter[JMeter引擎]
 SlaveNodes[Slave节点]
 AgentServices[Agent服务]
-end
+End
 UI --> Router
 Router --> Gin
 Gin --> ExecutionSvc
 Gin --> SlaveSvc
 ExecutionSvc --> CSVService
 ExecutionSvc --> AgentClient
+ExecutionSvc --> EnvService
+ExecutionSvc --> DiagService
 SlaveSvc --> AgentClient
 AgentClient --> AgentServices
 ExecutionSvc --> JMeter
@@ -233,7 +259,7 @@ SlaveSvc --> SQLite
 
 ### 数据流分析
 
-系统的核心数据流包括执行流程、监控流程和文件处理流程：
+**更新** 新增环境报告和网络回调检查的数据流：
 
 ```mermaid
 sequenceDiagram
@@ -241,12 +267,18 @@ participant Client as "客户端"
 participant API as "API处理器"
 participant Service as "业务服务"
 participant Agent as "Agent服务"
+participant EnvService as "环境服务"
 participant JMeter as "JMeter引擎"
 Client->>API : 创建执行请求
 API->>Service : CreateExecution()
 Service->>Service : 检查Slave节点状态
 Service->>Agent : 检查Agent健康状态
 Agent-->>Service : Agent健康检查结果
+Service->>EnvService : 收集环境报告
+EnvService->>Agent : 获取环境报告
+Agent-->>EnvService : 环境报告数据
+EnvService-->>Service : 环境一致性检查
+Service->>Service : 网络回调检查
 Service->>Service : CSV文件拆分和分发
 Service->>JMeter : 启动分布式压测
 JMeter-->>Service : 执行结果
@@ -407,7 +439,8 @@ CheckCSV --> |是| SplitCSV["拆分CSV文件"]
 CheckCSV --> |否| BuildCommand["构建JMeter命令"]
 SplitCSV --> UploadFiles["上传文件到Agent"]
 UploadFiles --> BuildCommand
-BuildCommand --> StartJMeter["启动JMeter执行"]
+BuildCommand --> CheckCallback["网络回调检查"]
+CheckCallback --> StartJMeter["启动JMeter执行"]
 StartJMeter --> MonitorProgress["监控执行进度"]
 MonitorProgress --> ParseResults["解析执行结果"]
 ParseResults --> UpdateStatus["更新执行状态"]
@@ -424,6 +457,7 @@ GenerateReport --> End([执行完成])
 - 实时日志流和监控指标
 - 执行超时保护机制
 - 错误详情捕获和分析
+- **新增** 网络回调可达性检查
 
 **章节来源**
 - [internal/service/execution.go:132-686](file://internal/service/execution.go#L132-L686)
@@ -443,6 +477,8 @@ Master->>Agent : HTTP健康检查
 Agent-->>Master : 健康状态和系统信息
 Master->>Agent : 系统资源监控
 Agent-->>Master : CPU/Memory/Disk/Network信息
+Master->>Agent : 环境报告获取
+Agent-->>Master : 环境一致性检查
 Master->>Master : 更新节点状态
 ```
 
@@ -454,22 +490,26 @@ Master->>Master : 更新节点状态
 - 连通性诊断
 - 系统资源监控
 - 故障自动恢复
+- **新增** 环境报告和一致性检查
 
 **章节来源**
 - [internal/service/slave.go:448-524](file://internal/service/slave.go#L448-L524)
 
 ### Agent文件服务
 
-Agent文件服务提供CSV文件的远程分发和清理功能：
+**更新** Agent文件服务现已增强，新增网络回调检查和环境报告功能：
 
 ```mermaid
 classDiagram
 class AgentServer {
 +dataDir string
 +token string
++jmeterPath string
 +handleHealth() http.HandlerFunc
 +handleUpload() http.HandlerFunc
 +handleFileOperations() http.HandlerFunc
++handleCheckCallback() http.HandlerFunc
++handleEnvironmentReport() http.HandlerFunc
 +authMiddleware(next) http.HandlerFunc
 }
 class FileOperation {
@@ -477,28 +517,106 @@ class FileOperation {
 +handleSingleDelete() void
 +handleBatchDelete() void
 }
-class SystemStats {
-+collectSystemStats() *SystemStats
-+CPUStats CPUStats
-+MemoryStats MemoryStats
-+DiskStats DiskStats
-+NetworkStats NetworkStats
+class EnvironmentReport {
+-AgentVersion string
+-JMeterPath string
+-JMeterHome string
+-JMeterVersion string
+-PluginJars []string
+-PropertiesLines []string
+-Warnings []string
+}
+class CallbackCheckRequest {
+-URL string
+}
+class CallbackCheckResponse {
+-Reachable bool
+-StatusCode int
+-LatencyMS int64
+-Error string
 }
 AgentServer --> FileOperation : "委托"
-AgentServer --> SystemStats : "使用"
+AgentServer --> EnvironmentReport : "使用"
+AgentServer --> CallbackCheckRequest : "接收"
+AgentServer --> CallbackCheckResponse : "返回"
 ```
 
 **图表来源**
 - [internal/agent/server.go:89-127](file://internal/agent/server.go#L89-L127)
+- [internal/agent/server.go:153-175](file://internal/agent/server.go#L153-L175)
+- [internal/agent/server.go:375-423](file://internal/agent/server.go#L375-L423)
 
 Agent服务特性：
 - 文件上传和删除
 - 系统资源监控
 - 鉴权保护
 - 健康检查
+- **新增** 网络回调可达性检查
+- **新增** JMeter环境报告生成
 
 **章节来源**
 - [internal/agent/server.go:105-326](file://internal/agent/server.go#L105-L326)
+
+### 环境报告服务
+
+**新增** 环境报告服务提供了全面的JMeter环境诊断能力：
+
+```mermaid
+flowchart TD
+EnvStart([环境报告收集]) --> ResolveJMeter["解析JMeter可执行文件路径"]
+ResolveJMeter --> DetectVersion["检测JMeter版本"]
+DetectVersion --> CollectPlugins["收集插件信息"]
+CollectPlugins --> CollectProps["收集配置文件信息"]
+CollectProps --> GenerateReport["生成环境报告"]
+GenerateReport --> CompareEnv["环境一致性比较"]
+CompareEnv --> SaveSnapshot["保存环境快照"]
+SaveSnapshot --> ReturnReport([返回报告])
+```
+
+**图表来源**
+- [internal/agent/server.go:375-423](file://internal/agent/server.go#L375-L423)
+- [internal/service/execution_environment.go:362-410](file://internal/service/execution_environment.go#L362-L410)
+
+环境报告功能包括：
+- JMeter可执行文件路径检测
+- JMeter版本信息收集
+- 插件清单和指纹生成
+- 配置文件内容规范化
+- 环境一致性差异分析
+- 环境快照保存和加载
+
+**章节来源**
+- [internal/service/execution_environment.go:173-433](file://internal/service/execution_environment.go#L173-L433)
+
+### 网络回调检查服务
+
+**新增** 网络回调检查服务提供了分布式环境下网络连通性的诊断能力：
+
+```mermaid
+sequenceDiagram
+participant Master as "Master节点"
+participant Agent as "Agent服务"
+participant Target as "目标回调服务"
+Master->>Agent : 检查回调可达性
+Agent->>Target : 发起HTTP GET请求
+Target-->>Agent : 返回HTTP响应
+Agent->>Agent : 计算延迟和状态
+Agent-->>Master : 返回可达性检查结果
+```
+
+**图表来源**
+- [internal/agent/server.go:177-218](file://internal/agent/server.go#L177-L218)
+- [internal/service/agent_client.go:202-232](file://internal/service/agent_client.go#L202-L232)
+
+网络回调检查功能包括：
+- 目标URL可达性验证
+- HTTP状态码检查
+- 延迟时间测量
+- 错误信息收集
+- 超时控制和安全检查
+
+**章节来源**
+- [internal/service/agent_client.go:202-232](file://internal/service/agent_client.go#L202-L232)
 
 ## 依赖关系分析
 
@@ -519,11 +637,15 @@ Net[net/http]
 OS[os]
 Path[path/filepath]
 Time[time]
+Exec[os/exec]
 end
 subgraph "业务逻辑"
 Execution[execution.go]
 Slave[slave.go]
 CSV[csv_split.go]
+EnvService[execution_environment.go]
+DiagService[execution_diagnostics.go]
+AgentClient[agent_client.go]
 end
 subgraph "数据访问"
 DB[db.go]
@@ -539,9 +661,12 @@ Execution --> YAML
 Execution --> Gopsutil
 Slave --> Gin
 Slave --> SQLite
-CSV --> OS
-CSV --> Path
-DB --> SQLite
+EnvService --> Exec
+EnvService --> Time
+DiagService --> OS
+DiagService --> Path
+AgentClient --> Net
+AgentClient --> Time
 Handler --> Gin
 Handler --> Execution
 Handler --> Slave
@@ -577,11 +702,13 @@ Router --> Handler
 - Slave节点心跳检测使用goroutine并发
 - CSV文件处理采用流式读取
 - 日志文件使用缓冲区优化I/O
+- **新增** 环境报告和网络检查的异步处理
 
 ### 存储优化
 - SQLite数据库索引优化查询性能
 - 文件系统直接访问减少中间层
 - 执行结果压缩和清理机制
+- **新增** 环境快照的高效存储和检索
 
 ## 故障排除指南
 
@@ -602,6 +729,16 @@ Router --> Handler
 - 检查磁盘空间充足
 - 验证文件权限设置
 
+**环境报告异常**
+- 检查JMeter可执行文件是否存在
+- 验证插件目录权限
+- 确认配置文件可读性
+
+**网络回调检查失败**
+- 验证目标URL可达性
+- 检查网络连接和代理设置
+- 确认超时时间和安全策略
+
 ### 日志分析
 
 系统提供了多层次的日志记录：
@@ -609,27 +746,40 @@ Router --> Handler
 - 错误详情日志
 - 系统资源监控日志
 - Agent健康检查日志
+- **新增** 环境报告生成日志
+- **新增** 网络回调检查日志
 
 **章节来源**
 - [internal/service/execution.go:559-668](file://internal/service/execution.go#L559-L668)
 
 ## 结论
 
-JMeter Agent系统是一个设计精良的分布式压测管理平台，具有以下优势：
+JMeter Agent系统是一个设计精良的分布式压测管理平台，经过本次更新后具备了更强大的诊断和运维能力：
 
 **技术优势**
 - 采用现代化的技术栈和架构设计
 - 模块化设计便于维护和扩展
 - 完善的错误处理和故障恢复机制
+- **新增** 强大的Agent诊断和环境一致性检查能力
 
 **功能特性**
 - 全面的分布式压测管理功能
 - 实时监控和分析能力
 - 用户友好的Web界面
+- **新增** 网络回调可达性检查
+- **新增** JMeter环境报告和指纹对比
+- **新增** 手动JMeter路径指定支持
 
 **部署便利性**
 - 单文件部署支持
 - 跨平台兼容性
 - 简化的配置管理
+- **新增** 增强的环境诊断工具
 
-该系统为JMeter分布式压测提供了完整的解决方案，适合中小型团队和企业级应用场景。通过持续的功能扩展和性能优化，可以满足不断增长的压测需求。
+**运维价值**
+- **新增** 环境一致性基线检查，确保分布式节点配置统一
+- **新增** 网络回调检查，提前发现网络连通性问题
+- **新增** 详细的JMeter环境报告，帮助快速定位配置问题
+- **新增** 手动JMeter路径指定，适应复杂的部署场景
+
+该系统为JMeter分布式压测提供了完整的解决方案，适合中小型团队和企业级应用场景。通过持续的功能扩展和性能优化，可以满足不断增长的压测需求。新增的Agent诊断能力显著提升了系统的可观测性和运维效率，为复杂分布式环境下的压测执行提供了强有力的技术保障。
