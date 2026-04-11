@@ -177,6 +177,87 @@
       </div>
     </div>
 
+    <div v-if="executionConclusion" class="section-card">
+      <div class="section-header">
+        <div class="section-label">CONCLUSION</div>
+        <div class="section-title">执行结论</div>
+      </div>
+      <div class="conclusion-panel" :class="`is-${executionConclusion.level || 'info'}`">
+        <div class="conclusion-main">
+          <div class="conclusion-title-row">
+            <span class="conclusion-badge" :class="`is-${executionConclusion.level || 'info'}`">
+              {{ conclusionLevelText }}
+            </span>
+            <span class="conclusion-title">{{ executionConclusion.title }}</span>
+          </div>
+          <div class="conclusion-summary">{{ executionConclusion.summary }}</div>
+        </div>
+        <div class="conclusion-grid">
+          <div class="conclusion-list-card">
+            <div class="conclusion-list-title">关键观察</div>
+            <div v-for="item in conclusionHighlights" :key="item" class="conclusion-list-item">
+              {{ item }}
+            </div>
+          </div>
+          <div class="conclusion-list-card">
+            <div class="conclusion-list-title">建议动作</div>
+            <div v-for="item in conclusionRecommendations" :key="item" class="conclusion-list-item">
+              {{ item }}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="timelineStages.length" class="section-card">
+      <div class="section-header">
+        <div class="section-label">TIMELINE</div>
+        <div class="section-title">执行链路</div>
+      </div>
+      <div class="timeline-grid">
+        <div v-for="stage in timelineStages" :key="stage.key" class="timeline-card" :class="`is-${stage.tone}`">
+          <div class="timeline-step">{{ stage.step }}</div>
+          <div class="timeline-name">{{ stage.name }}</div>
+          <div class="timeline-time">{{ stage.time }}</div>
+          <div class="timeline-desc">{{ stage.description }}</div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="samplerStats.length" class="section-card">
+      <div class="section-header">
+        <div class="section-label">SAMPLERS</div>
+        <div class="section-title">接口维度分析</div>
+      </div>
+      <div class="sampler-overview-grid">
+        <div v-for="card in samplerOverviewCards" :key="card.key" class="sampler-overview-card">
+          <div class="sampler-overview-label">{{ card.label }}</div>
+          <div class="sampler-overview-name">{{ card.name }}</div>
+          <div class="sampler-overview-value">{{ card.value }}</div>
+          <div class="sampler-overview-caption">{{ card.caption }}</div>
+        </div>
+      </div>
+      <el-table :data="displaySamplerStats" style="width: 100%" class="sampler-table">
+        <el-table-column type="index" label="#" width="60" />
+        <el-table-column prop="label" label="请求名称" min-width="180" show-overflow-tooltip />
+        <el-table-column prop="url" label="URL" min-width="220" show-overflow-tooltip />
+        <el-table-column prop="count" label="样本数" width="100" sortable />
+        <el-table-column prop="error" label="错误数" width="100" sortable />
+        <el-table-column label="错误率" width="110" sortable>
+          <template #default="{ row }">{{ formatNumber(row.error_rate) }}%</template>
+        </el-table-column>
+        <el-table-column label="平均RT" width="120" sortable>
+          <template #default="{ row }">{{ formatNumber(row.avg_rt) }} ms</template>
+        </el-table-column>
+        <el-table-column label="P95" width="120" sortable>
+          <template #default="{ row }">{{ formatNumber(row.p95) }} ms</template>
+        </el-table-column>
+        <el-table-column label="吞吐" width="110" sortable>
+          <template #default="{ row }">{{ formatNumber(row.throughput) }}/s</template>
+        </el-table-column>
+      </el-table>
+    </div>
+
     <!-- 节点监控面板 - 仅运行中显示 -->
     <div v-if="execution?.status === 'running' && nodeMetrics.length > 0" class="section-card node-metrics-panel">
       <div class="section-header">
@@ -1065,6 +1146,7 @@ const logSnapshotLoading = ref(false)
 const logTrimmed = ref(false)
 const pendingLogLines = ref([])
 let logFlushTimer = null
+let logSnapshotController = null
 const liveMetrics = ref({ points: [] })
 const detailRefreshing = ref(false)
 const liveRefreshing = ref(false)
@@ -1400,6 +1482,134 @@ const diagnosticCards = computed(() => {
 
 const diagnosticWarnings = computed(() => {
   return diagnostics.value?.warnings || []
+})
+
+const executionConclusion = computed(() => {
+  const conclusion = summary.value?.conclusion
+  return conclusion && typeof conclusion === 'object' ? conclusion : null
+})
+
+const conclusionHighlights = computed(() => {
+  const items = executionConclusion.value?.highlights
+  return Array.isArray(items) ? items : []
+})
+
+const conclusionRecommendations = computed(() => {
+  const items = executionConclusion.value?.recommendations
+  return Array.isArray(items) ? items : []
+})
+
+const conclusionLevelText = computed(() => {
+  const level = executionConclusion.value?.level
+  if (level === 'danger') return '高风险'
+  if (level === 'warning') return '需关注'
+  return '稳定'
+})
+
+const samplerStats = computed(() => {
+  const items = summary.value?.sampler_stats
+  return Array.isArray(items) ? items : []
+})
+
+const displaySamplerStats = computed(() => samplerStats.value.slice(0, 10))
+
+const samplerOverviewCards = computed(() => {
+  if (!samplerStats.value.length) return []
+  const hottest = samplerStats.value.reduce((best, item) => (item.count > (best?.count || 0) ? item : best), null)
+  const slowest = samplerStats.value.reduce((best, item) => (item.avg_rt > (best?.avg_rt || 0) ? item : best), null)
+  const riskiest = samplerStats.value.reduce((best, item) => (item.error > (best?.error || 0) ? item : best), null)
+  return [
+    {
+      key: 'hot',
+      label: '样本最多',
+      name: hottest?.label || '-',
+      value: hottest ? `${formatNumber(hottest.count)} 次` : '-',
+      caption: hottest?.url || '暂无接口数据'
+    },
+    {
+      key: 'slow',
+      label: '平均最慢',
+      name: slowest?.label || '-',
+      value: slowest ? `${formatNumber(slowest.avg_rt)} ms` : '-',
+      caption: slowest?.url || '暂无接口数据'
+    },
+    {
+      key: 'risk',
+      label: '错误最多',
+      name: riskiest?.label || '-',
+      value: riskiest ? `${formatNumber(riskiest.error)} 次 / ${formatNumber(riskiest.error_rate)}%` : '-',
+      caption: riskiest?.url || '暂无接口数据'
+    }
+  ]
+})
+
+const timelineStages = computed(() => {
+  if (!execution.value?.id) return []
+  const diag = diagnostics.value || {}
+  const stages = []
+  const pushStage = (key, step, name, time, description, tone = 'info') => {
+    if (!time && !description) return
+    stages.push({
+      key,
+      step,
+      name,
+      time: time || '-',
+      description: description || '-',
+      tone
+    })
+  }
+
+  pushStage(
+    'created',
+    '01',
+    '创建任务',
+    formatDateTime(execution.value.created_at),
+    execution.value.remarks || '已创建执行记录，等待脚本启动。',
+    'blue'
+  )
+  if (execution.value.start_time) {
+    pushStage(
+      'started',
+      '02',
+      '开始执行',
+      formatDateTime(execution.value.start_time),
+      diag.mode === 'local'
+        ? '当前任务在 Master 本机执行。'
+        : `执行模式：${diag.include_master ? 'Master + Slave' : '仅 Slave'}，节点数 ${diag.slave_count || 0}。`,
+      'green'
+    )
+  }
+  if (diag.runtime_scripts?.length) {
+    pushStage(
+      'runtime',
+      '03',
+      '生成运行时脚本',
+      formatDateTime(execution.value.start_time),
+      `已生成 ${diag.runtime_scripts.length} 份运行时脚本，CSV分片 ${diag.split_csv ? '开启' : '关闭'}。`,
+      'blue'
+    )
+  }
+  if (diag.save_http_details) {
+    pushStage(
+      'detail',
+      '04',
+      '错误明细回传',
+      execution.value.status === 'running' ? '执行中' : formatDateTime(execution.value.end_time),
+      `已回传 ${diag.received_detail_sources?.length || 0}/${diag.expected_detail_sources?.length || 0} 个来源。`,
+      diag.missing_detail_sources?.length ? 'warning' : 'green'
+    )
+  }
+  if (execution.value.end_time || execution.value.status !== 'running') {
+    pushStage(
+      'finished',
+      '05',
+      '结果落盘',
+      formatDateTime(execution.value.end_time),
+      diag.result_merge_ready ? '结果文件和报告链路已就绪。' : '执行已结束，但结果链路仍需补充检查。',
+      diag.result_merge_ready ? 'green' : 'warning'
+    )
+  }
+  return stages
 })
 
 const summaryMeta = computed(() => {
@@ -2104,18 +2314,28 @@ const scheduleLogFlush = () => {
 const fetchLog = async () => {
   if (leavingPage || !hasValidExecutionId.value) return
   if (logSnapshotLoading.value) return
+  if (logSnapshotController) {
+    logSnapshotController.abort()
+    logSnapshotController = null
+  }
+  logSnapshotController = new AbortController()
   logSnapshotLoading.value = true
   try {
-    const res = await fetch(`/api/executions/${executionNumericId.value}/log?snapshot=1&tail=${MAX_LOG_LINES}`)
+    const res = await fetch(`/api/executions/${executionNumericId.value}/log?snapshot=1&tail=${MAX_LOG_LINES}`, {
+      signal: logSnapshotController.signal
+    })
     const text = await res.text()
     setLogLines(text.split('\n').filter(line => line.trim() !== ''))
     nextTick(() => {
       scrollToBottom()
     })
   } catch (error) {
-    console.error('获取日志失败:', error)
-    setLogLines(['获取日志失败'])
+    if (error?.name !== 'AbortError') {
+      console.error('获取日志失败:', error)
+      setLogLines(['获取日志失败'])
+    }
   } finally {
+    logSnapshotController = null
     logSnapshotLoading.value = false
   }
 }
@@ -2424,6 +2644,10 @@ onBeforeUnmount(() => {
   leavingPage = true
   stopLogStream()
   stopMetricsPolling()
+  if (logSnapshotController) {
+    logSnapshotController.abort()
+    logSnapshotController = null
+  }
   if (refreshTimer.value) {
     clearInterval(refreshTimer.value)
     refreshTimer.value = null
@@ -2441,6 +2665,191 @@ onBeforeUnmount(() => {
 <style scoped lang="scss">
 .execution-detail-page {
   padding: 20px;
+}
+
+.conclusion-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 20px;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.08), rgba(255, 255, 255, 0.03));
+}
+
+.conclusion-panel.is-warning {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.1), rgba(255, 255, 255, 0.03));
+}
+
+.conclusion-panel.is-danger {
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.12), rgba(255, 255, 255, 0.03));
+}
+
+.conclusion-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.conclusion-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.conclusion-badge {
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(59, 130, 246, 0.14);
+  color: #5ab0ff;
+}
+
+.conclusion-badge.is-warning {
+  background: rgba(245, 158, 11, 0.14);
+  color: #ffbf5f;
+}
+
+.conclusion-badge.is-danger {
+  background: rgba(239, 68, 68, 0.14);
+  color: #ff7a7a;
+}
+
+.conclusion-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.conclusion-summary {
+  font-size: 14px;
+  line-height: 1.8;
+  color: var(--text-secondary);
+}
+
+.conclusion-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.conclusion-list-card,
+.timeline-card,
+.sampler-overview-card {
+  padding: 16px 18px;
+  border-radius: var(--radius-md);
+  background: rgba(10, 18, 32, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.conclusion-list-title {
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.conclusion-list-item {
+  position: relative;
+  padding-left: 14px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+
+.conclusion-list-item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 9px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-blue);
+}
+
+.timeline-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.timeline-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.timeline-card.is-green {
+  border-color: rgba(34, 197, 94, 0.22);
+}
+
+.timeline-card.is-warning {
+  border-color: rgba(245, 158, 11, 0.22);
+}
+
+.timeline-step {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--accent-blue);
+}
+
+.timeline-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.timeline-time {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.timeline-desc {
+  font-size: 12px;
+  line-height: 1.7;
+  color: rgba(214, 222, 237, 0.7);
+}
+
+.sampler-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.sampler-overview-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.sampler-overview-name {
+  margin-top: 8px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.sampler-overview-value {
+  margin-top: 6px;
+  font-size: 24px;
+  font-weight: 700;
+  color: #5ab0ff;
+}
+
+.sampler-overview-caption {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: rgba(214, 222, 237, 0.68);
+  word-break: break-all;
+}
+
+.sampler-table :deep(.el-table__cell) {
+  vertical-align: top;
 }
 
 // 区域卡片

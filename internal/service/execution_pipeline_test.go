@@ -53,8 +53,48 @@ func TestCompareExecutionEnvironments(t *testing.T) {
 	}
 
 	mismatches := compareExecutionEnvironments(base, others)
-	if len(mismatches) != 4 {
-		t.Fatalf("expected 4 mismatches, got %d: %v", len(mismatches), mismatches)
+	if len(mismatches) != 3 {
+		t.Fatalf("expected 3 actionable mismatches, got %d: %v", len(mismatches), mismatches)
+	}
+}
+
+func TestCompareExecutionEnvironmentsIgnoresRuntimeOnlyPropertiesWarnings(t *testing.T) {
+	base := executionEnvironmentReport{
+		Node:                  "master-local",
+		JMeterVersion:         "5.6.3",
+		AgentVersion:          "1.0.0",
+		PropertiesFingerprint: "base",
+		PropertiesLines: []string{
+			"jmeter.properties:remote_hosts=192.168.1.10:1099",
+			"user.properties:server.rmi.port=1099",
+			"user.properties:threads=100",
+		},
+	}
+	others := []executionEnvironmentReport{
+		{
+			Node:                  "slave-1",
+			JMeterVersion:         "5.6.3",
+			AgentVersion:          "1.0.0",
+			PropertiesFingerprint: "other",
+			PropertiesLines: []string{
+				"jmeter.properties:remote_hosts=192.168.1.11:1099",
+				"user.properties:server.rmi.port=2099",
+				"user.properties:threads=100",
+			},
+		},
+	}
+
+	mismatches := compareExecutionEnvironments(base, others)
+	if len(mismatches) != 1 {
+		t.Fatalf("expected 1 informational mismatch, got %d: %v", len(mismatches), mismatches)
+	}
+	if mismatches[0].Severity != "info" {
+		t.Fatalf("expected informational severity, got %+v", mismatches[0])
+	}
+
+	warnings := buildEnvironmentDifferenceWarnings(mismatches)
+	if len(warnings) != 0 {
+		t.Fatalf("expected runtime-only property differences not to block execution, got %v", warnings)
 	}
 }
 
@@ -263,6 +303,14 @@ func TestParseJTLResultsPrefersTransactionThroughput(t *testing.T) {
 	}
 	if got := int(summary["request_samples"].(float64)); got != 2 {
 		t.Fatalf("expected 2 request samples, got %d", got)
+	}
+	conclusion, ok := summary["conclusion"].(map[string]interface{})
+	if !ok || conclusion["title"] == "" {
+		t.Fatalf("expected conclusion in summary, got %v", summary["conclusion"])
+	}
+	samplerStats, ok := summary["sampler_stats"].([]interface{})
+	if !ok || len(samplerStats) == 0 {
+		t.Fatalf("expected sampler_stats in summary, got %v", summary["sampler_stats"])
 	}
 }
 

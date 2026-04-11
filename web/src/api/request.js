@@ -50,7 +50,11 @@ request.interceptors.response.use(
       if (!response.config?.silent) {
         ElMessage.error(res.message || '请求失败')
       }
-      return Promise.reject(new Error(res.message || '请求失败'))
+      const businessError = new Error(res.message || '请求失败')
+      businessError.response = response
+      businessError.config = response.config
+      businessError.isBusinessError = true
+      return Promise.reject(businessError)
     }
     return res
   },

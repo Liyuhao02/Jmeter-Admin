@@ -1658,6 +1658,18 @@ func parseJTLResults(jtlPaths ...string) (string, error) {
 	transactionErrorCount := 0
 	minTimeStamp := int64(0)
 	maxEndTimeStamp := int64(0)
+	type samplerAggregate struct {
+		Label       string
+		URL         string
+		Count       int
+		Success     int
+		Error       int
+		TotalRT     int64
+		MinRT       int64
+		MaxRT       int64
+		ElapsedList []float64
+	}
+	samplerStats := make(map[string]*samplerAggregate)
 
 	// 逐行读取数据
 	for _, record := range records {
@@ -1703,6 +1715,26 @@ func parseJTLResults(jtlPaths ...string) (string, error) {
 						}
 					}
 				}
+
+				samplerKey := strings.TrimSpace(label) + "|" + strings.TrimSpace(url)
+				sampler := samplerStats[samplerKey]
+				if sampler == nil {
+					sampler = &samplerAggregate{
+						Label: label,
+						URL:   url,
+						MinRT: -1,
+					}
+					samplerStats[samplerKey] = sampler
+				}
+				sampler.Count++
+				sampler.TotalRT += elapsed
+				sampler.ElapsedList = append(sampler.ElapsedList, float64(elapsed))
+				if sampler.MinRT == -1 || elapsed < sampler.MinRT {
+					sampler.MinRT = elapsed
+				}
+				if elapsed > sampler.MaxRT {
+					sampler.MaxRT = elapsed
+				}
 			}
 		}
 
@@ -1710,9 +1742,15 @@ func parseJTLResults(jtlPaths ...string) (string, error) {
 			if success {
 				successCount++
 				requestSuccessCount++
+				if sampler := samplerStats[strings.TrimSpace(label)+"|"+strings.TrimSpace(url)]; sampler != nil {
+					sampler.Success++
+				}
 			} else {
 				errorCount++
 				requestErrorCount++
+				if sampler := samplerStats[strings.TrimSpace(label)+"|"+strings.TrimSpace(url)]; sampler != nil {
+					sampler.Error++
+				}
 			}
 		}
 
@@ -1803,6 +1841,60 @@ func parseJTLResults(jtlPaths ...string) (string, error) {
 		minElapsed = 0
 	}
 
+	samplerList := make([]map[string]interface{}, 0, len(samplerStats))
+	for _, sampler := range samplerStats {
+		avgRT := 0.0
+		errorRatePerSampler := 0.0
+		successRatePerSampler := 0.0
+		throughputPerSampler := 0.0
+		if sampler.Count > 0 {
+			avgRT = float64(sampler.TotalRT) / float64(sampler.Count)
+			errorRatePerSampler = float64(sampler.Error) * 100 / float64(sampler.Count)
+			successRatePerSampler = float64(sampler.Success) * 100 / float64(sampler.Count)
+		}
+		if durationSeconds > 0 {
+			throughputPerSampler = float64(sampler.Count) / durationSeconds
+		} else {
+			throughputPerSampler = float64(sampler.Count)
+		}
+		p50Sampler, p90Sampler, p95Sampler, p99Sampler := calculatePercentiles(sampler.ElapsedList)
+		if sampler.MinRT == -1 {
+			sampler.MinRT = 0
+		}
+		samplerList = append(samplerList, map[string]interface{}{
+			"label":        sampler.Label,
+			"url":          sampler.URL,
+			"count":        sampler.Count,
+			"success":      sampler.Success,
+			"error":        sampler.Error,
+			"error_rate":   errorRatePerSampler,
+			"success_rate": successRatePerSampler,
+			"avg_rt":       avgRT,
+			"min_rt":       sampler.MinRT,
+			"max_rt":       sampler.MaxRT,
+			"p50":          p50Sampler,
+			"p90":          p90Sampler,
+			"p95":          p95Sampler,
+			"p99":          p99Sampler,
+			"throughput":   throughputPerSampler,
+		})
+	}
+	sort.Slice(samplerList, func(i, j int) bool {
+		leftCount := intValueFromMap(samplerList[i], "count")
+		rightCount := intValueFromMap(samplerList[j], "count")
+		if leftCount == rightCount {
+			leftError := intValueFromMap(samplerList[i], "error")
+			rightError := intValueFromMap(samplerList[j], "error")
+			return leftError > rightError
+		}
+		return leftCount > rightCount
+	})
+	if len(samplerList) > 30 {
+		samplerList = samplerList[:30]
+	}
+
+	conclusion := buildExecutionConclusion(totalSamples, requestSamples, transactionSamples, requestErrorCount, errorRate, successRate, avgElapsed, p95, p99, primaryThroughputLabel, primaryThroughput, samplerList)
+
 	// 构建结果
 	result := map[string]interface{}{
 		"total_samples":               totalSamples,
@@ -1836,6 +1928,8 @@ func parseJTLResults(jtlPaths ...string) (string, error) {
 		"sent_bytes":                  totalSentBytes,
 		"received_bytes_per_sec":      receivedBytesPerSec,
 		"sent_bytes_per_sec":          sentBytesPerSec,
+		"sampler_stats":               samplerList,
+		"conclusion":                  conclusion,
 	}
 
 	resultJSON, err := json.Marshal(result)
@@ -1886,6 +1980,134 @@ func calculatePercentiles(values []float64) (p50, p90, p95, p99 float64) {
 	p99 = values[idx99]
 
 	return p50, p90, p95, p99
+}
+
+func intValueFromMap(item map[string]interface{}, key string) int {
+	value, ok := item[key]
+	if !ok {
+		return 0
+	}
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	default:
+		return 0
+	}
+}
+
+func floatValueFromMap(item map[string]interface{}, key string) float64 {
+	value, ok := item[key]
+	if !ok {
+		return 0
+	}
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	default:
+		return 0
+	}
+}
+
+func stringValueFromMap(item map[string]interface{}, key string) string {
+	value, ok := item[key]
+	if !ok {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	return ""
+}
+
+func buildExecutionConclusion(totalSamples, requestSamples, transactionSamples, requestErrorCount int, errorRate, successRate, avgRT, p95, p99 float64, throughputLabel string, throughput float64, samplerList []map[string]interface{}) map[string]interface{} {
+	level := "success"
+	title := "压测结果整体稳定"
+	summary := "本次执行的核心指标整体平稳，可继续结合接口排行和错误分析做针对性复盘。"
+	if totalSamples == 0 {
+		level = "warning"
+		title = "未采集到有效请求样本"
+		summary = "执行已结束，但结果中没有有效请求样本，请优先检查脚本结构、监听器和结果文件配置。"
+	} else if requestSamples > 0 && requestErrorCount == requestSamples {
+		level = "danger"
+		title = "本次压测请求全部失败"
+		summary = "所有请求样本均失败，当前结果更像环境、鉴权、依赖或脚本断言问题，而不是正常的性能压测结果。"
+	} else if errorRate >= 20 {
+		level = "danger"
+		title = "错误率偏高，结果不达标"
+		summary = "本次压测已出现明显失败流量，建议优先定位失败接口与失败时间段，再评估性能指标是否还有参考价值。"
+	} else if errorRate >= 5 {
+		level = "warning"
+		title = "存在失败流量，需要重点复盘"
+		summary = "本次压测不是全绿结果，建议优先查看错误分析与最慢接口，确认失败是否集中在特定接口或特定时间窗口。"
+	} else if p95 > avgRT*2 && avgRT > 0 {
+		level = "warning"
+		title = "响应抖动较大"
+		summary = "虽然整体成功率较高，但长尾延迟明显高于平均水平，建议重点关注 P95/P99 与慢接口排行。"
+	}
+
+	highlights := make([]string, 0, 4)
+	highlights = append(highlights, fmt.Sprintf("成功率 %.2f%% / 错误率 %.2f%%", successRate, errorRate))
+	highlights = append(highlights, fmt.Sprintf("%s %.2f", throughputLabel, throughput))
+	highlights = append(highlights, fmt.Sprintf("平均 RT %.2f ms / P95 %.2f ms / P99 %.2f ms", avgRT, p95, p99))
+	if transactionSamples > 0 {
+		highlights = append(highlights, fmt.Sprintf("共识别事务样本 %d，请优先用 TPS（事务/s）口径复盘。", transactionSamples))
+	}
+
+	recommendations := make([]string, 0, 4)
+	switch level {
+	case "danger":
+		recommendations = append(recommendations,
+			"先看错误分析，确认失败是断言失败、业务失败还是网络/依赖问题。",
+			"优先检查 Top 错误接口和错误时间线，判断失败是否集中在某一批接口或某一时间段。",
+		)
+	case "warning":
+		recommendations = append(recommendations,
+			"结合慢接口排行与实时趋势，确认 RT 抬升是否与并发提升同步发生。",
+			"将本次结果与基线执行对比，判断是回归退化还是单次波动。",
+		)
+	default:
+		recommendations = append(recommendations,
+			"建议保留当前结果作为基线，后续执行可直接做回归对比。",
+			"继续关注 Top 接口的长尾 RT，避免平均值掩盖局部瓶颈。",
+		)
+	}
+
+	if len(samplerList) > 0 {
+		hottest := samplerList[0]
+		highlights = append(highlights, fmt.Sprintf("样本最多的接口是 %s（%d 次）", stringValueFromMap(hottest, "label"), intValueFromMap(hottest, "count")))
+		slowest := samplerList[0]
+		riskiest := samplerList[0]
+		for _, item := range samplerList[1:] {
+			if floatValueFromMap(item, "avg_rt") > floatValueFromMap(slowest, "avg_rt") {
+				slowest = item
+			}
+			if intValueFromMap(item, "error") > intValueFromMap(riskiest, "error") {
+				riskiest = item
+			}
+		}
+		recommendations = append(recommendations,
+			fmt.Sprintf("优先关注最慢接口 %s（平均 %.2f ms）。", stringValueFromMap(slowest, "label"), floatValueFromMap(slowest, "avg_rt")),
+			fmt.Sprintf("若要快速定位风险，先检查错误最多的接口 %s。", stringValueFromMap(riskiest, "label")),
+		)
+	}
+
+	return map[string]interface{}{
+		"level":           level,
+		"title":           title,
+		"summary":         summary,
+		"highlights":      dedupeStrings(highlights),
+		"recommendations": dedupeStrings(recommendations),
+	}
 }
 
 func mergeJTLFiles(inputPaths []string, outputPath string) error {

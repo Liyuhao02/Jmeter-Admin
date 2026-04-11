@@ -34,6 +34,7 @@ type executionEnvironmentReport struct {
 type executionEnvironmentDifference struct {
 	Node     string   `json:"node"`
 	Category string   `json:"category"`
+	Severity string   `json:"severity,omitempty"`
 	Summary  string   `json:"summary"`
 	Baseline string   `json:"baseline,omitempty"`
 	Current  string   `json:"current,omitempty"`
@@ -42,10 +43,10 @@ type executionEnvironmentDifference struct {
 }
 
 type executionEnvironmentSnapshot struct {
-	CheckedAt   string                         `json:"checked_at"`
-	Baseline    executionEnvironmentReport     `json:"baseline"`
-	Nodes       []executionEnvironmentReport   `json:"nodes"`
-	Warnings    []string                       `json:"warnings"`
+	CheckedAt   string                           `json:"checked_at"`
+	Baseline    executionEnvironmentReport       `json:"baseline"`
+	Nodes       []executionEnvironmentReport     `json:"nodes"`
+	Warnings    []string                         `json:"warnings"`
 	Differences []executionEnvironmentDifference `json:"differences,omitempty"`
 }
 
@@ -266,9 +267,45 @@ func diffStringSets(base, current []string) ([]string, []string) {
 	return dedupeStrings(added), dedupeStrings(missing)
 }
 
+var ignorablePropertyKeys = map[string]struct{}{
+	"jmeter.properties:remote_hosts":             {},
+	"user.properties:remote_hosts":               {},
+	"jmeter.properties:java.rmi.server.hostname": {},
+	"user.properties:java.rmi.server.hostname":   {},
+	"jmeter.properties:server.rmi.localport":     {},
+	"user.properties:server.rmi.localport":       {},
+	"jmeter.properties:server.rmi.port":          {},
+	"user.properties:server.rmi.port":            {},
+	"jmeter.properties:server.rmi.ssl.disable":   {},
+	"user.properties:server.rmi.ssl.disable":     {},
+}
+
+func extractPropertyLineKey(line string) string {
+	separator := strings.Index(line, "=")
+	if separator == -1 {
+		return strings.TrimSpace(line)
+	}
+	return strings.TrimSpace(line[:separator])
+}
+
+func splitPropertyDifferences(lines []string) (important []string, ignorable []string) {
+	for _, line := range lines {
+		key := extractPropertyLineKey(line)
+		if _, ok := ignorablePropertyKeys[key]; ok {
+			ignorable = append(ignorable, line)
+			continue
+		}
+		important = append(important, line)
+	}
+	return dedupeStrings(important), dedupeStrings(ignorable)
+}
+
 func buildEnvironmentDifferenceWarnings(differences []executionEnvironmentDifference) []string {
 	warnings := make([]string, 0, len(differences))
 	for _, diff := range differences {
+		if diff.Severity == "info" {
+			continue
+		}
 		warnings = append(warnings, diff.Summary)
 	}
 	return warnings
@@ -300,6 +337,7 @@ func compareExecutionEnvironments(base executionEnvironmentReport, others []exec
 			differences = append(differences, executionEnvironmentDifference{
 				Node:     report.Node,
 				Category: "plugins",
+				Severity: "warning",
 				Summary:  fmt.Sprintf("%s 的插件清单与基线节点不一致", report.Node),
 				Added:    added,
 				Missing:  missing,
@@ -308,19 +346,35 @@ func compareExecutionEnvironments(base executionEnvironmentReport, others []exec
 
 		if base.PropertiesFingerprint != "" && report.PropertiesFingerprint != "" && report.PropertiesFingerprint != base.PropertiesFingerprint {
 			added, missing := diffStringSets(base.PropertiesLines, report.PropertiesLines)
-			differences = append(differences, executionEnvironmentDifference{
-				Node:     report.Node,
-				Category: "properties",
-				Summary:  fmt.Sprintf("%s 的 jmeter/user.properties 指纹与基线节点不一致", report.Node),
-				Added:    added,
-				Missing:  missing,
-			})
+			importantAdded, ignorableAdded := splitPropertyDifferences(added)
+			importantMissing, ignorableMissing := splitPropertyDifferences(missing)
+			if len(importantAdded) > 0 || len(importantMissing) > 0 {
+				differences = append(differences, executionEnvironmentDifference{
+					Node:     report.Node,
+					Category: "properties",
+					Severity: "warning",
+					Summary:  fmt.Sprintf("%s 的 jmeter/user.properties 存在关键差异，需要关注执行一致性", report.Node),
+					Added:    importantAdded,
+					Missing:  importantMissing,
+				})
+			}
+			if len(ignorableAdded) > 0 || len(ignorableMissing) > 0 {
+				differences = append(differences, executionEnvironmentDifference{
+					Node:     report.Node,
+					Category: "properties_runtime",
+					Severity: "info",
+					Summary:  fmt.Sprintf("%s 存在节点级 properties 差异（通常可忽略）", report.Node),
+					Added:    ignorableAdded,
+					Missing:  ignorableMissing,
+				})
+			}
 		}
 
 		if strings.TrimSpace(base.AgentVersion) != "" && strings.TrimSpace(report.AgentVersion) != "" && report.AgentVersion != base.AgentVersion {
 			differences = append(differences, executionEnvironmentDifference{
 				Node:     report.Node,
 				Category: "agent_version",
+				Severity: "warning",
 				Summary:  fmt.Sprintf("%s 的 Agent 版本为 %s，基线节点为 %s", report.Node, report.AgentVersion, base.AgentVersion),
 				Baseline: base.AgentVersion,
 				Current:  report.AgentVersion,
