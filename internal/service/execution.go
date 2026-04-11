@@ -11,6 +11,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
 	"os/exec"
@@ -55,6 +56,19 @@ type executionProcessGroup struct {
 }
 
 var executionProcesses sync.Map
+
+type errorAnalysisCacheEntry struct {
+	Signature string
+	ExpiresAt time.Time
+	Analysis  *ErrorAnalysis
+}
+
+var (
+	errorAnalysisCache   = make(map[int64]errorAnalysisCacheEntry)
+	errorAnalysisCacheMu sync.RWMutex
+)
+
+const errorAnalysisCacheTTL = 2 * time.Second
 
 // setProcessGroup 设置进程组属性（仅在 Unix 系统上）
 func setProcessGroup(cmd *exec.Cmd) {
@@ -129,7 +143,18 @@ func calcJVMArgs() string {
 }
 
 // CreateExecution 创建并启动执行
-func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPDetails bool, includeMaster bool, splitCSV bool) (*model.Execution, error) {
+type ExecutionEnvironmentValidationError struct {
+	Snapshot *executionEnvironmentSnapshot
+}
+
+func (e *ExecutionEnvironmentValidationError) Error() string {
+	if e == nil || e.Snapshot == nil || len(e.Snapshot.Warnings) == 0 {
+		return "环境一致性存在差异"
+	}
+	return "环境一致性存在差异：" + strings.Join(e.Snapshot.Warnings, "; ")
+}
+
+func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPDetails bool, includeMaster bool, splitCSV bool, ignoreEnvironmentWarnings bool) (*model.Execution, error) {
 	// 1. 查询脚本信息
 	var script model.Script
 	var scriptFilePath string
@@ -148,6 +173,7 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 	slaveHosts := []string{}
 	var offlineSlaveIDs []int64 // 离线的 slave ID 列表
 	slaves := []model.Slave{}   // 存储完整的 slave 信息
+	var environmentSnapshot *executionEnvironmentSnapshot
 	if len(slaveIDs) > 0 {
 		placeholders := make([]string, len(slaveIDs))
 		queryArgs := make([]interface{}, len(slaveIDs))
@@ -156,7 +182,7 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 			queryArgs[i] = id
 		}
 		query := fmt.Sprintf(
-			"SELECT id, host, port, agent_port, agent_token FROM slaves WHERE id IN (%s) AND status = 'online'",
+			"SELECT id, name, host, port, agent_port, agent_token FROM slaves WHERE id IN (%s) AND status = 'online'",
 			strings.Join(placeholders, ","),
 		)
 		rows, err := database.DB.Query(query, queryArgs...)
@@ -168,7 +194,7 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 		onlineIDs := make(map[int64]bool)
 		for rows.Next() {
 			var slave model.Slave
-			if err := rows.Scan(&slave.ID, &slave.Host, &slave.Port, &slave.AgentPort, &slave.AgentToken); err != nil {
+			if err := rows.Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.AgentPort, &slave.AgentToken); err != nil {
 				fmt.Printf("[警告] 扫描 Slave 数据失败: %v\n", err)
 				continue
 			}
@@ -186,6 +212,49 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 
 		if len(slaveHosts) == 0 {
 			return nil, fmt.Errorf("选中的 Slave 节点均不在线，请检查节点状态")
+		}
+	}
+
+	if len(slaveHosts) > 0 {
+		masterHost := strings.TrimSpace(config.GlobalConfig.JMeter.MasterHostname)
+		if masterHost == "" {
+			return nil, fmt.Errorf("分布式执行前请先配置 Master 回调地址")
+		}
+		callbackProbeURL := fmt.Sprintf("http://%s:%d/api/executions/callback-probe", masterHost, config.GlobalConfig.Server.Port)
+		var callbackFailures []string
+		for _, slave := range slaves {
+			result, err := CheckSlaveCallbackReachability(slave, callbackProbeURL)
+			if err != nil {
+				callbackFailures = append(callbackFailures, fmt.Sprintf("%s(%s): %v", slave.Name, slave.Host, err))
+				continue
+			}
+			if !result.Reachable {
+				reason := result.Error
+				if reason == "" {
+					reason = fmt.Sprintf("HTTP %d", result.StatusCode)
+				}
+				callbackFailures = append(callbackFailures, fmt.Sprintf("%s(%s): %s", slave.Name, slave.Host, reason))
+			}
+		}
+		if len(callbackFailures) > 0 {
+			return nil, fmt.Errorf("分布式回调可达性预检失败，请确认 Slave 可回调 Master：%s", strings.Join(callbackFailures, "; "))
+		}
+		fmt.Printf("[分布式预检] 回调可达性通过，回调地址: %s\n", callbackProbeURL)
+
+		environmentSnapshot, err = validateExecutionEnvironments(slaves, includeMaster)
+		if err != nil {
+			return nil, err
+		}
+		if environmentSnapshot != nil {
+			if len(environmentSnapshot.Warnings) > 0 {
+				fmt.Printf("[分布式预检] 环境存在差异，基线节点: %s\n", environmentSnapshot.Baseline.Node)
+				if !ignoreEnvironmentWarnings {
+					return nil, &ExecutionEnvironmentValidationError{Snapshot: environmentSnapshot}
+				}
+				fmt.Printf("[分布式预检] 已忽略环境差异并继续执行: %s\n", strings.Join(environmentSnapshot.Warnings, "; "))
+			} else {
+				fmt.Printf("[分布式预检] 环境一致性通过，基线节点: %s\n", environmentSnapshot.Baseline.Node)
+			}
 		}
 	}
 
@@ -211,6 +280,9 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 	if err := os.MkdirAll(resultDir, 0755); err != nil {
 		return nil, fmt.Errorf("创建结果目录失败: %w", err)
 	}
+	if err := saveExecutionEnvironmentSnapshot(resultDir, environmentSnapshot); err != nil {
+		fmt.Printf("[警告] 保存环境快照失败: %v\n", err)
+	}
 
 	resultPath := filepath.Join(resultDir, "result.jtl")
 	localResultPath := filepath.Join(resultDir, "result-local.jtl")
@@ -231,153 +303,287 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 		return nil, fmt.Errorf("更新执行记录路径失败: %w", err)
 	}
 
-	runScriptPath := scriptFilePath
+	localScriptPath := scriptFilePath  // Master 本地执行用的脚本
+	remoteScriptPath := scriptFilePath // Slave 远程执行用的脚本
 	fmt.Printf("[执行 #%d] save_http_details=%t\n", execID, saveHTTPDetails)
 	runDistributedWithLocal := len(slaveHosts) > 0 && includeMaster
 	fmt.Printf("[执行 #%d] include_master=%t\n", execID, includeMaster)
+	scriptDir := filepath.Dir(scriptFilePath)
+	jmxContent, err := os.ReadFile(scriptFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("读取JMX文件失败: %w", err)
+	}
 
-	// === CSV 拆分分发（仅分布式 + 开启 split_csv 时） ===
-	if splitCSV && len(slaves) > 0 {
-		// 读取 JMX 文件内容
-		jmxContent, err := os.ReadFile(scriptFilePath)
-		if err != nil {
-			fmt.Printf("[警告] 读取JMX文件失败: %v\n", err)
-		} else {
-			// 解析提取所有 CSVDataSet 的 filename
-			csvFiles := extractCSVDataSetFiles(string(jmxContent))
-
-			if len(csvFiles) > 0 {
-				fmt.Printf("[执行 #%d] 发现CSV文件: %v\n", execID, csvFiles)
-
-				// 确定分片数
-				partCount := len(slaves)
-				if includeMaster {
-					partCount++
-				}
-
-				scriptDir := filepath.Dir(scriptFilePath)
-				csvDataDir := config.GlobalConfig.JMeter.AgentCSVDataDir
-				localCSVDir := filepath.Join(resultDir, "csv-data")
-				os.MkdirAll(localCSVDir, 0755)
-
-				// 用于清理的文件列表
-				var allPartFiles []string
-				var csvFileNames []string
-
-				// 拆分每个 CSV 文件
-				for _, csvFile := range csvFiles {
-					csvFileName := filepath.Base(csvFile)
-					csvFileNames = append(csvFileNames, csvFileName)
-
-					// 确定原始CSV路径
-					var originalPath string
-					if filepath.IsAbs(csvFile) {
-						originalPath = csvFile
-					} else {
-						originalPath = filepath.Join(scriptDir, csvFile)
-					}
-
-					// 检查文件是否存在
-					if _, err := os.Stat(originalPath); os.IsNotExist(err) {
-						fmt.Printf("[警告] CSV文件不存在: %s\n", originalPath)
-						continue
-					}
-
-					// 拆分CSV文件
-					parts, err := SplitCSV(originalPath, partCount, true, resultDir, csvFileName)
-					if err != nil {
-						fmt.Printf("[警告] 拆分CSV文件失败 %s: %v\n", csvFileName, err)
-						continue
-					}
-					allPartFiles = append(allPartFiles, parts...)
-					fmt.Printf("[执行 #%d] CSV %s 已拆分为 %d 份\n", execID, csvFileName, len(parts))
-
-					// 按序号分发到各 Slave
-					for i, slave := range slaves {
-						if i < len(parts) {
-							client := NewAgentClient(slave.Host, slave.AgentPort, slave.AgentToken)
-							if err := client.UploadFile(parts[i], csvFileName); err != nil {
-								fmt.Printf("[警告] 上传CSV到Slave %s失败: %v\n", slave.Host, err)
-							} else {
-								fmt.Printf("[执行 #%d] 已上传 %s 到 Slave %s\n", execID, csvFileName, slave.Host)
-							}
-						}
-					}
-
-					// 如果 includeMaster，最后一个 part 复制到本地
-					if includeMaster && len(parts) > len(slaves) {
-						masterPart := parts[len(slaves)]
-						localPath := filepath.Join(localCSVDir, csvFileName)
-						if err := copyFile(masterPart, localPath); err != nil {
-							fmt.Printf("[警告] 复制CSV到本地失败 %s: %v\n", csvFileName, err)
-						} else {
-							fmt.Printf("[执行 #%d] 已复制 %s 到本地\n", execID, csvFileName)
-						}
-						allPartFiles = append(allPartFiles, localPath)
-					}
-				}
-
-				// 生成运行时 JMX（替换 CSVDataSet filename）
-				if len(csvFileNames) > 0 {
-					runtimeJMXPath := filepath.Join(resultDir, "runtime.jmx")
-					modifiedContent := replaceCSVDataSetPaths(string(jmxContent), csvDataDir)
-					if err := os.WriteFile(runtimeJMXPath, []byte(modifiedContent), 0644); err != nil {
-						fmt.Printf("[警告] 写入运行时JMX失败: %v\n", err)
-					} else {
-						runScriptPath = runtimeJMXPath
-						fmt.Printf("[执行 #%d] 已生成运行时JMX: %s\n", execID, runtimeJMXPath)
-					}
-				}
-
-				// 注册清理回调（在 goroutine 末尾异步调用）
-				go func(execID int64, slaves []model.Slave, csvFiles []string) {
-					// 等待执行完成
-					for {
-						var status string
-						if err := database.DB.QueryRow(
-							"SELECT status FROM executions WHERE id = ?", execID,
-						).Scan(&status); err != nil {
-							fmt.Printf("[警告] 查询执行 #%d 状态失败: %v\n", execID, err)
-							time.Sleep(2 * time.Second)
-							continue // 查询失败时继续重试，不要退出循环
-						}
-						if status != "running" {
-							break
-						}
-						time.Sleep(2 * time.Second)
-					}
-
-					// 清理 Slave 上的 CSV 文件
-					for _, slave := range slaves {
-						client := NewAgentClient(slave.Host, slave.AgentPort, slave.AgentToken)
-						for _, csvFile := range csvFiles {
-							if err := client.DeleteFile(csvFile); err != nil {
-								fmt.Printf("[警告] 清理Slave %s上的CSV失败 %s: %v\n", slave.Host, csvFile, err)
-							}
-						}
-					}
-
-					// 清理本地临时文件
-					for _, partFile := range allPartFiles {
-						os.Remove(partFile)
-					}
-					os.RemoveAll(localCSVDir)
-
-					fmt.Printf("[执行 #%d] CSV分发清理完成\n", execID)
-				}(execID, slaves, csvFileNames)
+	attachedFileLookup := make(map[string]string)
+	if scriptFiles, fileErr := GetScriptFiles(scriptID); fileErr == nil {
+		for _, file := range scriptFiles {
+			base := filepath.Base(file.FileName)
+			if base == "" {
+				base = filepath.Base(file.FilePath)
+			}
+			if base != "" {
+				attachedFileLookup[base] = file.FilePath
 			}
 		}
 	}
 
-	if saveHTTPDetails {
-		// 使用当前准备好的运行脚本作为源（可能已包含 CSV 分片路径修改）
-		sourceScript := runScriptPath
-		runtimeScriptPath := filepath.Join(resultDir, "runtime_with_details.jmx")
-		if err := createRuntimeJMXWithErrorDetailListener(sourceScript, runtimeScriptPath); err != nil {
-			return nil, fmt.Errorf("生成带错误明细监听器的运行脚本失败: %w", err)
+	// === CSV 拆分分发（仅分布式 + 开启 split_csv 时） ===
+	successfullySplitCSVRefs := make(map[string]string)
+	if splitCSV && len(slaves) > 0 {
+		csvRefs := extractCSVDataSetReferences(string(jmxContent))
+
+		if len(csvRefs) > 0 {
+			csvRefGroups := make(map[string][]csvDataSetReference)
+			csvFiles := make([]string, 0)
+			for _, ref := range csvRefs {
+				if _, exists := csvRefGroups[ref.Filename]; !exists {
+					csvFiles = append(csvFiles, ref.Filename)
+				}
+				csvRefGroups[ref.Filename] = append(csvRefGroups[ref.Filename], ref)
+			}
+
+			fmt.Printf("[执行 #%d] 发现CSV文件: %v\n", execID, csvFiles)
+
+			partCount := len(slaves)
+			if includeMaster {
+				partCount++
+			}
+
+			csvDataDir := config.GlobalConfig.JMeter.AgentCSVDataDir
+			localCSVDir := filepath.Join(resultDir, "csv-data")
+			os.MkdirAll(localCSVDir, 0755)
+
+			var allPartFiles []string
+			var cleanupCSVTargetNames []string
+
+			for index, csvFile := range csvFiles {
+				csvFileName := filepath.Base(csvFile)
+				targetName := buildRuntimeTargetName(execID, "csv", csvFile, index+1)
+
+				originalPath, resolveErr := resolveRuntimeDependencySourcePath(csvFile, scriptDir, attachedFileLookup)
+				if resolveErr != nil {
+					fmt.Printf("[警告] 解析CSV文件失败 %s: %v\n", csvFileName, resolveErr)
+					continue
+				}
+
+				hasHeader, headerConsistent := hasConsistentCSVHeaderConfig(csvRefGroups[csvFile])
+				if !headerConsistent {
+					fmt.Printf("[警告] CSV %s 在多个 CSVDataSet 中 ignoreFirstLine 配置不一致，将回退为常规依赖文件分发逻辑\n", csvFileName)
+					continue
+				}
+
+				parts, err := SplitCSV(originalPath, partCount, hasHeader, resultDir, targetName)
+				if err != nil {
+					fmt.Printf("[警告] 拆分CSV文件失败 %s: %v\n", csvFileName, err)
+					continue
+				}
+				allPartFiles = append(allPartFiles, parts...)
+				fmt.Printf("[执行 #%d] CSV %s 已拆分为 %d 份\n", execID, csvFileName, len(parts))
+
+				distributedSuccessfully := true
+				for i, slave := range slaves {
+					if i >= len(parts) {
+						break
+					}
+					client := NewAgentClient(slave.Host, slave.AgentPort, slave.AgentToken)
+					if err := client.UploadFile(parts[i], targetName); err != nil {
+						fmt.Printf("[警告] 上传CSV到Slave %s失败: %v\n", slave.Host, err)
+						distributedSuccessfully = false
+					} else {
+						fmt.Printf("[执行 #%d] 已上传 %s 到 Slave %s\n", execID, targetName, slave.Host)
+					}
+				}
+
+				if includeMaster && len(parts) > len(slaves) {
+					masterPart := parts[len(slaves)]
+					localPath := filepath.Join(localCSVDir, targetName)
+					if err := copyFile(masterPart, localPath); err != nil {
+						fmt.Printf("[警告] 复制CSV到本地失败 %s: %v\n", csvFileName, err)
+						distributedSuccessfully = false
+					} else {
+						fmt.Printf("[执行 #%d] 已复制 %s 到本地\n", execID, targetName)
+					}
+					allPartFiles = append(allPartFiles, localPath)
+				}
+
+				if distributedSuccessfully {
+					successfullySplitCSVRefs[csvFile] = targetName
+					cleanupCSVTargetNames = append(cleanupCSVTargetNames, targetName)
+				} else {
+					fmt.Printf("[警告] CSV %s 未完整分发成功，将回退为常规依赖文件分发逻辑\n", csvFileName)
+				}
+			}
+
+			if len(successfullySplitCSVRefs) > 0 {
+				runtimeRemoteJMXPath := filepath.Join(resultDir, "runtime-remote.jmx")
+				remoteContent := replaceCSVDataSetPathsWithMap(string(jmxContent), csvDataDir, successfullySplitCSVRefs)
+				if err := os.WriteFile(runtimeRemoteJMXPath, []byte(remoteContent), 0644); err != nil {
+					fmt.Printf("[警告] 写入 Slave 运行时JMX失败: %v\n", err)
+				} else {
+					remoteScriptPath = runtimeRemoteJMXPath
+					fmt.Printf("[执行 #%d] 已生成 Slave 运行时JMX: %s\n", execID, runtimeRemoteJMXPath)
+				}
+
+				if includeMaster {
+					localCSVAbsPath, err := filepath.Abs(localCSVDir)
+					if err != nil {
+						fmt.Printf("[警告] 获取本地CSV绝对路径失败: %v\n", err)
+						localCSVAbsPath = localCSVDir
+					}
+					runtimeLocalJMXPath := filepath.Join(resultDir, "runtime-local.jmx")
+					localContent := replaceCSVDataSetPathsWithMap(string(jmxContent), localCSVAbsPath, successfullySplitCSVRefs)
+					if err := os.WriteFile(runtimeLocalJMXPath, []byte(localContent), 0644); err != nil {
+						fmt.Printf("[警告] 写入 Master 运行时JMX失败: %v\n", err)
+					} else {
+						localScriptPath = runtimeLocalJMXPath
+						fmt.Printf("[执行 #%d] 已生成 Master 运行时JMX: %s (CSV路径: %s)\n", execID, runtimeLocalJMXPath, localCSVAbsPath)
+					}
+				}
+			}
+
+			go func(execID int64, slaves []model.Slave, csvFiles []string) {
+				for {
+					var status string
+					if err := database.DB.QueryRow(
+						"SELECT status FROM executions WHERE id = ?", execID,
+					).Scan(&status); err != nil {
+						fmt.Printf("[警告] 查询执行 #%d 状态失败: %v\n", execID, err)
+						time.Sleep(2 * time.Second)
+						continue
+					}
+					if status != "running" {
+						break
+					}
+					time.Sleep(2 * time.Second)
+				}
+
+				for _, slave := range slaves {
+					client := NewAgentClient(slave.Host, slave.AgentPort, slave.AgentToken)
+					for _, csvFile := range csvFiles {
+						if err := client.DeleteFile(csvFile); err != nil {
+							fmt.Printf("[警告] 清理Slave %s上的CSV失败 %s: %v\n", slave.Host, csvFile, err)
+						}
+					}
+				}
+
+				for _, partFile := range allPartFiles {
+					os.Remove(partFile)
+				}
+				os.RemoveAll(localCSVDir)
+
+				fmt.Printf("[执行 #%d] CSV分发清理完成\n", execID)
+			}(execID, slaves, cleanupCSVTargetNames)
 		}
-		runScriptPath = runtimeScriptPath
-		fmt.Printf("[执行 #%d] 已生成错误明细运行脚本: %s\n", execID, runtimeScriptPath)
+	}
+
+	if len(slaveHosts) > 0 {
+		attachedNames := getAttachedScriptFileNames(scriptID)
+		dependencyScan := inspectJMXDependencies(scriptFilePath, attachedNames, true, splitCSV)
+		splitCSVSet := make(map[string]bool)
+		if splitCSV {
+			for dep := range successfullySplitCSVRefs {
+				splitCSVSet[dep] = true
+			}
+		}
+
+		remoteDependencyMap := make(map[string]string)
+		cleanupDependencyTargetNames := make([]string, 0)
+		for depIndex, dep := range append(append([]string{}, dependencyScan.CSVFiles...), dependencyScan.FileDependencies...) {
+			baseName := filepath.Base(dep)
+			if baseName == "" || splitCSVSet[dep] {
+				continue
+			}
+
+			sourcePath, resolveErr := resolveRuntimeDependencySourcePath(dep, scriptDir, attachedFileLookup)
+			if resolveErr != nil {
+				fmt.Printf("[警告] 解析依赖文件失败 %s: %v\n", dep, resolveErr)
+				continue
+			}
+
+			targetName := buildRuntimeTargetName(execID, "dep", dep, depIndex+1)
+			uploaded := false
+			for _, slave := range slaves {
+				client := NewAgentClient(slave.Host, slave.AgentPort, slave.AgentToken)
+				if err := client.UploadFile(sourcePath, targetName); err != nil {
+					fmt.Printf("[警告] 上传依赖到Slave %s失败 %s: %v\n", slave.Host, targetName, err)
+				} else {
+					uploaded = true
+					fmt.Printf("[执行 #%d] 已上传依赖 %s 到 Slave %s\n", execID, targetName, slave.Host)
+				}
+			}
+
+			if uploaded {
+				remoteDependencyMap[dep] = targetName
+				cleanupDependencyTargetNames = append(cleanupDependencyTargetNames, targetName)
+			}
+		}
+
+		if len(remoteDependencyMap) > 0 {
+			baseContentPath := remoteScriptPath
+			baseContentBytes, readErr := os.ReadFile(baseContentPath)
+			if readErr != nil {
+				fmt.Printf("[警告] 读取远端运行脚本失败 %s: %v\n", baseContentPath, readErr)
+			} else {
+				rewrittenContent := replaceFileDependencyPathsWithMap(string(baseContentBytes), config.GlobalConfig.JMeter.AgentCSVDataDir, remoteDependencyMap)
+				runtimeRemoteJMXPath := filepath.Join(resultDir, "runtime-remote.jmx")
+				if err := os.WriteFile(runtimeRemoteJMXPath, []byte(rewrittenContent), 0644); err != nil {
+					fmt.Printf("[警告] 写入带依赖路径的Slave运行时JMX失败: %v\n", err)
+				} else {
+					remoteScriptPath = runtimeRemoteJMXPath
+					fmt.Printf("[执行 #%d] 已生成带依赖路径的 Slave 运行时JMX: %s\n", execID, runtimeRemoteJMXPath)
+				}
+			}
+
+			go func(execID int64, slaves []model.Slave, fileNames []string) {
+				for {
+					var status string
+					if err := database.DB.QueryRow("SELECT status FROM executions WHERE id = ?", execID).Scan(&status); err != nil {
+						time.Sleep(2 * time.Second)
+						continue
+					}
+					if status != "running" {
+						break
+					}
+					time.Sleep(2 * time.Second)
+				}
+
+				for _, slave := range slaves {
+					client := NewAgentClient(slave.Host, slave.AgentPort, slave.AgentToken)
+					for _, fileName := range fileNames {
+						if err := client.DeleteFile(fileName); err != nil {
+							fmt.Printf("[警告] 清理Slave %s上的依赖失败 %s: %v\n", slave.Host, fileName, err)
+						}
+					}
+				}
+			}(execID, slaves, dedupeStrings(cleanupDependencyTargetNames))
+		}
+	}
+
+	if saveHTTPDetails {
+		if len(slaveHosts) > 0 {
+			runtimeRemoteScriptPath := filepath.Join(resultDir, "runtime-remote-with-details.jmx")
+			if err := createRuntimeJMXWithErrorDetailListener(remoteScriptPath, runtimeRemoteScriptPath); err != nil {
+				return nil, fmt.Errorf("生成分布式错误明细运行脚本失败: %w", err)
+			}
+			remoteScriptPath = runtimeRemoteScriptPath
+			fmt.Printf("[执行 #%d] 已生成分布式错误明细运行脚本: %s\n", execID, runtimeRemoteScriptPath)
+
+			if includeMaster {
+				runtimeLocalScriptPath := filepath.Join(resultDir, "runtime-local-with-details.jmx")
+				if err := createRuntimeJMXWithErrorDetailListener(localScriptPath, runtimeLocalScriptPath); err != nil {
+					return nil, fmt.Errorf("生成本地错误明细运行脚本失败: %w", err)
+				}
+				localScriptPath = runtimeLocalScriptPath
+				fmt.Printf("[执行 #%d] 已生成本地错误明细运行脚本: %s\n", execID, runtimeLocalScriptPath)
+			}
+		} else {
+			runtimeLocalScriptPath := filepath.Join(resultDir, "runtime-with-details.jmx")
+			if err := createRuntimeJMXWithErrorDetailListener(localScriptPath, runtimeLocalScriptPath); err != nil {
+				return nil, fmt.Errorf("生成带错误明细监听器的运行脚本失败: %w", err)
+			}
+			localScriptPath = runtimeLocalScriptPath
+			fmt.Printf("[执行 #%d] 已生成错误明细运行脚本: %s\n", execID, runtimeLocalScriptPath)
+		}
 		fmt.Printf("[执行 #%d] 本地错误明细文件: %s\n", execID, errorDetailPath)
 		if len(slaveHosts) > 0 {
 			masterHost := strings.TrimSpace(config.GlobalConfig.JMeter.MasterHostname)
@@ -435,9 +641,9 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 		fmt.Printf("[警告] 创建临时属性文件失败: %v\n", err)
 	}
 
-	buildBaseArgs := func(targetResultPath string, generateReport bool) []string {
+	buildBaseArgs := func(targetResultPath string, generateReport bool, scriptPath string) []string {
 		args := []string{
-			"-n", "-t", runScriptPath,
+			"-n", "-t", scriptPath,
 			"-l", targetResultPath,
 			"-q", propsFile,
 		}
@@ -450,8 +656,8 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 		return args
 	}
 
-	buildLocalArgs := func(targetResultPath string, generateReport bool) []string {
-		args := buildBaseArgs(targetResultPath, generateReport)
+	buildLocalArgs := func(targetResultPath string, generateReport bool, scriptPath string) []string {
+		args := buildBaseArgs(targetResultPath, generateReport, scriptPath)
 		if saveHTTPDetails {
 			args = append(args, "-JjmeterAdmin.errorDetailFile="+errorDetailPath)
 			args = append(args, "-JjmeterAdmin.captureHttpDetails=true")
@@ -462,8 +668,8 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 		return args
 	}
 
-	buildRemoteArgs := func(targetResultPath string, generateReport bool) []string {
-		args := buildBaseArgs(targetResultPath, generateReport)
+	buildRemoteArgs := func(targetResultPath string, generateReport bool, scriptPath string) []string {
+		args := buildBaseArgs(targetResultPath, generateReport, scriptPath)
 		args = append(args, "-R", strings.Join(slaveHosts, ","))
 		for _, key := range propKeys {
 			args = append(args, "-G"+key+"="+saveServiceProps[key])
@@ -500,14 +706,15 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 
 	var localArgs []string
 	var remoteArgs []string
+	runPlan := buildExecutionRunPlan(len(slaveHosts) > 0, includeMaster)
 	switch {
-	case len(slaveHosts) > 0 && runDistributedWithLocal:
-		localArgs = buildLocalArgs(localResultPath, false)
-		remoteArgs = buildRemoteArgs(remoteResultPath, false)
-	case len(slaveHosts) > 0:
-		remoteArgs = buildRemoteArgs(resultPath, true)
+	case runPlan.RunLocal && runPlan.RunRemote:
+		localArgs = buildLocalArgs(localResultPath, false, localScriptPath)
+		remoteArgs = buildRemoteArgs(remoteResultPath, false, remoteScriptPath)
+	case runPlan.RunRemote:
+		remoteArgs = buildRemoteArgs(resultPath, true, remoteScriptPath)
 	default:
-		localArgs = buildLocalArgs(resultPath, true)
+		localArgs = buildLocalArgs(resultPath, true, localScriptPath)
 	}
 
 	// 输出执行日志
@@ -581,6 +788,9 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 		}
 		executionProcesses.Store(execID, processGroup)
 		defer executionProcesses.Delete(execID)
+		indexerStop := make(chan struct{})
+		go startExecutionErrorAnalysisIndexer(execID, indexerStop, logFile)
+		defer close(indexerStop)
 
 		var execErr error
 
@@ -791,6 +1001,7 @@ func ListExecutionsFiltered(page, pageSize int, scriptID, status, keyword, start
 			e.SummaryData = summaryData.String
 		}
 		e.IsBaseline = isBaseline == 1
+		enrichExecutionForDisplay(&e, false)
 		executions = append(executions, e)
 	}
 
@@ -872,6 +1083,7 @@ func GetExecution(id int64) (*model.Execution, error) {
 		e.SummaryData = summaryData.String
 	}
 	e.IsBaseline = isBaseline == 1
+	enrichExecutionForDisplay(&e, true)
 
 	return &e, nil
 }
@@ -1156,25 +1368,51 @@ func GetExecutionLiveMetrics(id int64) (*LiveExecutionMetrics, error) {
 		errorRate = float64(errorTransactions) * 100 / float64(totalTransactions)
 	}
 
+	hasTransactionSamples := totalTransactions > 0
+	primaryThroughputLabel := "请求次数（次/秒）"
+	primaryThroughputField := "request_rate"
+	primaryThroughputUnit := "req/s"
+	currentPrimaryThroughput := currentRequestRate
+	avgPrimaryThroughput := avgRequestRate
+	peakPrimaryThroughput := peakRequestRate
+	if hasTransactionSamples {
+		primaryThroughputLabel = "TPS（事务/s）"
+		primaryThroughputField = "tps"
+		primaryThroughputUnit = "tps"
+		currentPrimaryThroughput = currentTPS
+		avgPrimaryThroughput = avgTPS
+		peakPrimaryThroughput = peakTPS
+	}
+
 	return &LiveExecutionMetrics{
-		Status:             execution.Status,
-		TotalRequests:      totalRequests,
-		SuccessRequests:    successRequests,
-		ErrorRequests:      errorRequests,
-		CurrentTPS:         currentTPS,
-		AvgTPS:             avgTPS,
-		PeakTPS:            peakTPS,
-		CurrentRequestRate: currentRequestRate,
-		AvgRequestRate:     avgRequestRate,
-		PeakRequestRate:    peakRequestRate,
-		CurrentRT:          currentRT,
-		AvgRT:              avgRT,
-		SuccessRate:        successRate,
-		ErrorRate:          errorRate,
-		CurrentConcurrency: currentConcurrency,
-		PeakConcurrency:    peakConcurrency,
-		DurationSeconds:    durationSeconds,
-		Points:             points,
+		Status:                   execution.Status,
+		TotalRequests:            totalRequests,
+		SuccessRequests:          successRequests,
+		ErrorRequests:            errorRequests,
+		TotalTransactions:        totalTransactions,
+		SuccessTransactions:      successTransactions,
+		ErrorTransactions:        errorTransactions,
+		HasTransactionSamples:    hasTransactionSamples,
+		PrimaryThroughputLabel:   primaryThroughputLabel,
+		PrimaryThroughputField:   primaryThroughputField,
+		PrimaryThroughputUnit:    primaryThroughputUnit,
+		CurrentPrimaryThroughput: currentPrimaryThroughput,
+		AvgPrimaryThroughput:     avgPrimaryThroughput,
+		PeakPrimaryThroughput:    peakPrimaryThroughput,
+		CurrentTPS:               currentTPS,
+		AvgTPS:                   avgTPS,
+		PeakTPS:                  peakTPS,
+		CurrentRequestRate:       currentRequestRate,
+		AvgRequestRate:           avgRequestRate,
+		PeakRequestRate:          peakRequestRate,
+		CurrentRT:                currentRT,
+		AvgRT:                    avgRT,
+		SuccessRate:              successRate,
+		ErrorRate:                errorRate,
+		CurrentConcurrency:       currentConcurrency,
+		PeakConcurrency:          peakConcurrency,
+		DurationSeconds:          durationSeconds,
+		Points:                   points,
 	}, nil
 }
 
@@ -1536,6 +1774,18 @@ func parseJTLResults(jtlPaths ...string) (string, error) {
 		requestRate = float64(requestSamples)
 		transactionTPS = float64(baseTransactionSamples)
 	}
+	primaryThroughput := requestRate
+	primaryThroughputLabel := "请求次数（次/秒）"
+	primaryThroughputField := "request_rate"
+	primaryThroughputUnit := "req/s"
+	sampleBasis := "request"
+	if transactionSamples > 0 {
+		primaryThroughput = transactionTPS
+		primaryThroughputLabel = "TPS（事务/s）"
+		primaryThroughputField = "transaction_tps"
+		primaryThroughputUnit = "tps"
+		sampleBasis = "transaction"
+	}
 	errorRate := 0.0
 	successRate := 0.0
 	if requestSamples > 0 {
@@ -1555,28 +1805,37 @@ func parseJTLResults(jtlPaths ...string) (string, error) {
 
 	// 构建结果
 	result := map[string]interface{}{
-		"total_samples":          totalSamples,
-		"success_samples":        successCount,
-		"error_samples":          errorCount,
-		"avg_response_time":      avgElapsed,
-		"min_response_time":      minElapsed,
-		"max_response_time":      maxElapsed,
-		"throughput":             throughput,
-		"transaction_tps":        transactionTPS,
-		"request_rate":           requestRate,
-		"error_rate":             errorRate,
-		"success_rate":           successRate,
-		"transaction_samples":    transactionSamples,
-		"request_samples":        requestSamples,
-		"p50":                    p50,
-		"p90":                    p90,
-		"p95":                    p95,
-		"p99":                    p99,
-		"sample_span_ms":         durationMs,
-		"received_bytes":         totalBytes,
-		"sent_bytes":             totalSentBytes,
-		"received_bytes_per_sec": receivedBytesPerSec,
-		"sent_bytes_per_sec":     sentBytesPerSec,
+		"total_samples":               totalSamples,
+		"success_samples":             successCount,
+		"error_samples":               errorCount,
+		"request_success_samples":     requestSuccessCount,
+		"request_error_samples":       requestErrorCount,
+		"transaction_success_samples": transactionSuccessCount,
+		"transaction_error_samples":   transactionErrorCount,
+		"avg_response_time":           avgElapsed,
+		"min_response_time":           minElapsed,
+		"max_response_time":           maxElapsed,
+		"throughput":                  throughput,
+		"transaction_tps":             transactionTPS,
+		"request_rate":                requestRate,
+		"primary_throughput":          primaryThroughput,
+		"primary_throughput_label":    primaryThroughputLabel,
+		"primary_throughput_field":    primaryThroughputField,
+		"primary_throughput_unit":     primaryThroughputUnit,
+		"sample_basis":                sampleBasis,
+		"error_rate":                  errorRate,
+		"success_rate":                successRate,
+		"transaction_samples":         transactionSamples,
+		"request_samples":             requestSamples,
+		"p50":                         p50,
+		"p90":                         p90,
+		"p95":                         p95,
+		"p99":                         p99,
+		"sample_span_ms":              durationMs,
+		"received_bytes":              totalBytes,
+		"sent_bytes":                  totalSentBytes,
+		"received_bytes_per_sec":      receivedBytesPerSec,
+		"sent_bytes_per_sec":          sentBytesPerSec,
 	}
 
 	resultJSON, err := json.Marshal(result)
@@ -1630,6 +1889,8 @@ func calculatePercentiles(values []float64) (p50, p90, p95, p99 float64) {
 }
 
 func mergeJTLFiles(inputPaths []string, outputPath string) error {
+	log.Printf("[JTL合并] 输入文件: %v", inputPaths)
+
 	type filePayload struct {
 		headers []string
 		records [][]string
@@ -1643,6 +1904,7 @@ func mergeJTLFiles(inputPaths []string, outputPath string) error {
 		file, err := os.Open(inputPath)
 		if err != nil {
 			if os.IsNotExist(err) {
+				log.Printf("[JTL合并][警告] 结果文件不存在: %s", inputPath)
 				continue
 			}
 			return fmt.Errorf("打开结果文件失败 %s: %w", inputPath, err)
@@ -1655,6 +1917,7 @@ func mergeJTLFiles(inputPaths []string, outputPath string) error {
 		if err != nil {
 			file.Close()
 			if err == io.EOF {
+				log.Printf("[JTL合并][警告] 结果文件为空: %s", inputPath)
 				continue
 			}
 			return fmt.Errorf("读取结果文件表头失败 %s: %w", inputPath, err)
@@ -1699,6 +1962,11 @@ func mergeJTLFiles(inputPaths []string, outputPath string) error {
 		}
 	}
 	writer.Flush()
+	totalRecords := 0
+	for _, p := range payloads {
+		totalRecords += len(p.records)
+	}
+	log.Printf("[JTL合并] 合并完成: %d 个数据源, 共 %d 条记录", len(payloads), totalRecords)
 	return writer.Error()
 }
 
@@ -1834,7 +2102,7 @@ type CodeCount struct {
 
 // TimelinePoint 错误时间线点
 type TimelinePoint struct {
-	Minute      string  `json:"minute"` // "15:04" 格式
+	TimeBucket  string  `json:"time_bucket"` // "15:04:05" 格式（10秒粒度）
 	ErrorCount  int     `json:"error_count"`
 	SampleCount int     `json:"sample_count"`
 	ErrorRate   float64 `json:"error_rate"`
@@ -1884,24 +2152,34 @@ type LiveMetricPoint struct {
 }
 
 type LiveExecutionMetrics struct {
-	Status             string            `json:"status"`
-	TotalRequests      int               `json:"total_requests"`
-	SuccessRequests    int               `json:"success_requests"`
-	ErrorRequests      int               `json:"error_requests"`
-	CurrentTPS         float64           `json:"current_tps"`
-	AvgTPS             float64           `json:"avg_tps"`
-	PeakTPS            float64           `json:"peak_tps"`
-	CurrentRequestRate float64           `json:"current_request_rate"`
-	AvgRequestRate     float64           `json:"avg_request_rate"`
-	PeakRequestRate    float64           `json:"peak_request_rate"`
-	CurrentRT          float64           `json:"current_rt"`
-	AvgRT              float64           `json:"avg_rt"`
-	SuccessRate        float64           `json:"success_rate"`
-	ErrorRate          float64           `json:"error_rate"`
-	CurrentConcurrency int               `json:"current_concurrency"`
-	PeakConcurrency    int               `json:"peak_concurrency"`
-	DurationSeconds    int64             `json:"duration_seconds"`
-	Points             []LiveMetricPoint `json:"points"`
+	Status                   string            `json:"status"`
+	TotalRequests            int               `json:"total_requests"`
+	SuccessRequests          int               `json:"success_requests"`
+	ErrorRequests            int               `json:"error_requests"`
+	TotalTransactions        int               `json:"total_transactions"`
+	SuccessTransactions      int               `json:"success_transactions"`
+	ErrorTransactions        int               `json:"error_transactions"`
+	HasTransactionSamples    bool              `json:"has_transaction_samples"`
+	PrimaryThroughputLabel   string            `json:"primary_throughput_label"`
+	PrimaryThroughputField   string            `json:"primary_throughput_field"`
+	PrimaryThroughputUnit    string            `json:"primary_throughput_unit"`
+	CurrentPrimaryThroughput float64           `json:"current_primary_throughput"`
+	AvgPrimaryThroughput     float64           `json:"avg_primary_throughput"`
+	PeakPrimaryThroughput    float64           `json:"peak_primary_throughput"`
+	CurrentTPS               float64           `json:"current_tps"`
+	AvgTPS                   float64           `json:"avg_tps"`
+	PeakTPS                  float64           `json:"peak_tps"`
+	CurrentRequestRate       float64           `json:"current_request_rate"`
+	AvgRequestRate           float64           `json:"avg_request_rate"`
+	PeakRequestRate          float64           `json:"peak_request_rate"`
+	CurrentRT                float64           `json:"current_rt"`
+	AvgRT                    float64           `json:"avg_rt"`
+	SuccessRate              float64           `json:"success_rate"`
+	ErrorRate                float64           `json:"error_rate"`
+	CurrentConcurrency       int               `json:"current_concurrency"`
+	PeakConcurrency          int               `json:"peak_concurrency"`
+	DurationSeconds          int64             `json:"duration_seconds"`
+	Points                   []LiveMetricPoint `json:"points"`
 }
 
 type liveBucket struct {
@@ -2199,7 +2477,7 @@ func createRuntimeJMXWithErrorDetailListener(sourcePath, targetPath string) erro
 	if err != nil {
 		return err
 	}
-	xmlContent := string(content)
+	xmlContent := absolutizeRuntimeDependencyPaths(string(content), filepath.Dir(sourcePath))
 	insertPos, err := findTestPlanHashTreeInsertPos(xmlContent)
 	if err != nil {
 		return err
@@ -2350,6 +2628,7 @@ func SaveUploadedExecutionErrorDetails(execID int64, token, source, content stri
 	if err := os.WriteFile(targetFile, []byte(content), 0644); err != nil {
 		return fmt.Errorf("保存错误明细文件失败: %w", err)
 	}
+	go refreshExecutionErrorAnalysisIndex(execID, nil)
 	return nil
 }
 
@@ -2428,6 +2707,24 @@ func sourceMatchesExpected(expected, received string) bool {
 	if expected == "" || received == "" {
 		return false
 	}
+	extractHost := func(value string) string {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return ""
+		}
+		if idx := strings.Index(value, "("); idx > 0 {
+			value = strings.TrimSpace(value[:idx])
+		}
+		if idx := strings.IndexAny(value, " \t"); idx > 0 {
+			value = strings.TrimSpace(value[:idx])
+		}
+		return value
+	}
+	expectedHost := extractHost(expected)
+	receivedHost := extractHost(received)
+	if expectedHost != "" && receivedHost != "" && expectedHost == receivedHost {
+		return true
+	}
 	if strings.Contains(received, expected) {
 		return true
 	}
@@ -2438,8 +2735,35 @@ func sourceMatchesExpected(expected, received string) bool {
 	return false
 }
 
+// truncateToTenSeconds 将时间戳字符串截取到10秒级别（格式: "15:04:05"）
+// 支持 epoch 毫秒数和日期时间字符串两种格式
+func truncateToTenSeconds(timestampStr string) string {
+	if timestampStr == "" {
+		return "unknown"
+	}
+	// 尝试解析为 epoch 毫秒
+	if ms, err := strconv.ParseInt(timestampStr, 10, 64); err == nil {
+		t := time.Unix(ms/1000, (ms%1000)*1e6)
+		// 截断到10秒
+		t = t.Truncate(10 * time.Second)
+		return t.Format("15:04:05")
+	}
+	// 尝试解析为日期时间字符串（带毫秒）
+	if t, err := time.Parse("2006-01-02 15:04:05.000", timestampStr); err == nil {
+		t = t.Truncate(10 * time.Second)
+		return t.Format("15:04:05")
+	}
+	// 尝试解析为日期时间字符串（不带毫秒）
+	if t, err := time.Parse("2006-01-02 15:04:05", timestampStr); err == nil {
+		t = t.Truncate(10 * time.Second)
+		return t.Format("15:04:05")
+	}
+	return "unknown"
+}
+
 // truncateToMinute 将时间戳字符串截取到分钟级别（格式: "15:04"）
 // 支持 epoch 毫秒数和日期时间字符串两种格式
+// 已弃用：请使用 truncateToTenSeconds
 func truncateToMinute(timestampStr string) string {
 	if timestampStr == "" {
 		return "unknown"
@@ -2480,6 +2804,51 @@ func buildEmptyErrorAnalysis(execution *model.Execution, hint string) *ErrorAnal
 	}
 }
 
+func statSignaturePart(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return path + "|missing"
+	}
+	return fmt.Sprintf("%s|%d|%d", path, info.Size(), info.ModTime().UnixNano())
+}
+
+func buildErrorAnalysisSignature(resultPath string) string {
+	parts := []string{statSignaturePart(resultPath)}
+	baseDir := filepath.Dir(resultPath)
+	parts = append(parts, statSignaturePart(filepath.Join(baseDir, "error-details.ndjson")))
+	files, err := filepath.Glob(filepath.Join(baseDir, "error-details", "*.ndjson"))
+	if err == nil {
+		sort.Strings(files)
+		for _, file := range files {
+			parts = append(parts, statSignaturePart(file))
+		}
+	}
+	return strings.Join(parts, "||")
+}
+
+func getCachedErrorAnalysis(execID int64, signature string) *ErrorAnalysis {
+	errorAnalysisCacheMu.RLock()
+	entry, ok := errorAnalysisCache[execID]
+	errorAnalysisCacheMu.RUnlock()
+	if !ok {
+		return nil
+	}
+	if entry.Signature != signature || time.Now().After(entry.ExpiresAt) {
+		return nil
+	}
+	return entry.Analysis
+}
+
+func setCachedErrorAnalysis(execID int64, signature string, analysis *ErrorAnalysis) {
+	errorAnalysisCacheMu.Lock()
+	errorAnalysisCache[execID] = errorAnalysisCacheEntry{
+		Signature: signature,
+		ExpiresAt: time.Now().Add(errorAnalysisCacheTTL),
+		Analysis:  analysis,
+	}
+	errorAnalysisCacheMu.Unlock()
+}
+
 // GetExecutionErrors 获取执行错误记录
 func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 	// 1. 查询执行记录获取 result_path
@@ -2494,8 +2863,27 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 	}
 
 	resultPaths := discoverExecutionResultPaths(resultPath)
+	if len(resultPaths) > 1 {
+		if info, statErr := os.Stat(resultPath); statErr != nil || info.Size() == 0 {
+			if mergeErr := mergeJTLFiles(resultPaths, resultPath); mergeErr != nil {
+				fmt.Printf("[JTL合并][警告] 错误分析自动合并失败: %v\n", mergeErr)
+				resultPath = resultPaths[0]
+			}
+		}
+	}
 	if len(resultPaths) > 0 {
-		resultPath = resultPaths[0]
+		if info, statErr := os.Stat(resultPath); statErr != nil || info.Size() == 0 {
+			resultPath = resultPaths[0]
+		}
+	}
+
+	cacheSignature := buildErrorAnalysisSignature(resultPath)
+	if cached := getCachedErrorAnalysis(execID, cacheSignature); cached != nil {
+		return cached, nil
+	}
+	if indexed, ok := loadIndexedErrorAnalysis(resultPath, cacheSignature); ok {
+		setCachedErrorAnalysis(execID, cacheSignature, indexed)
+		return indexed, nil
 	}
 
 	// 2. 打开并解析 JTL 文件
@@ -2623,9 +3011,9 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 
 	// 新增收集变量
 	codeCountMap := make(map[string]int)           // responseCode → count
-	timelineMap := make(map[string]*TimelinePoint) // "HH:MM" → point
+	timelineMap := make(map[string]*TimelinePoint) // "HH:MM:SS" → point (10秒粒度)
 	messageCounts := make(map[string]int)          // failureMessage → count
-	totalSamplesByMinute := make(map[string]int)   // 每分钟总样本数
+	totalSamplesByBucket := make(map[string]int)   // 每个时间桶总样本数
 
 	getField := func(record []string, field string) string {
 		if idx, ok := colIndex[strings.TrimSpace(field)]; ok && idx < len(record) {
@@ -2672,9 +3060,9 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 
 		// 收集时间戳用于时间线统计
 		tsStr := getField(record, "timeStamp")
-		minute := truncateToMinute(tsStr)
-		if minute != "unknown" {
-			totalSamplesByMinute[minute]++
+		timeBucket := truncateToTenSeconds(tsStr)
+		if timeBucket != "unknown" {
+			totalSamplesByBucket[timeBucket]++
 		}
 
 		success := getField(record, "success")
@@ -2689,12 +3077,12 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 
 		// 收集错误统计数据
 		codeCountMap[responseCode]++
-		if minute != "unknown" {
-			if point, ok := timelineMap[minute]; ok {
+		if timeBucket != "unknown" {
+			if point, ok := timelineMap[timeBucket]; ok {
 				point.ErrorCount++
 			} else {
-				timelineMap[minute] = &TimelinePoint{
-					Minute:     minute,
+				timelineMap[timeBucket] = &TimelinePoint{
+					TimeBucket: timeBucket,
 					ErrorCount: 1,
 				}
 			}
@@ -2848,8 +3236,8 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 
 	// 构建错误时间线统计
 	errorTimeline := make([]TimelinePoint, 0, len(timelineMap))
-	for minute, point := range timelineMap {
-		point.SampleCount = totalSamplesByMinute[minute]
+	for bucket, point := range timelineMap {
+		point.SampleCount = totalSamplesByBucket[bucket]
 		if point.SampleCount > 0 {
 			point.ErrorRate = float64(point.ErrorCount) * 100.0 / float64(point.SampleCount)
 		}
@@ -2857,7 +3245,7 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 	}
 	// 按时间排序
 	sort.Slice(errorTimeline, func(i, j int) bool {
-		return errorTimeline[i].Minute < errorTimeline[j].Minute
+		return errorTimeline[i].TimeBucket < errorTimeline[j].TimeBucket
 	})
 
 	// 构建 Top 错误信息统计
@@ -2877,7 +3265,7 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 		topErrorMessages = topErrorMessages[:10]
 	}
 
-	return &ErrorAnalysis{
+	analysis := &ErrorAnalysis{
 		TotalErrors:              totalErrors,
 		TotalSamples:             totalSamples,
 		ErrorRate:                errorRate,
@@ -2895,7 +3283,12 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 		ResponseCodeDistribution: responseCodeDistribution,
 		ErrorTimeline:            errorTimeline,
 		TopErrorMessages:         topErrorMessages,
-	}, nil
+	}
+	setCachedErrorAnalysis(execID, cacheSignature, analysis)
+	if err := saveIndexedErrorAnalysis(resultPath, cacheSignature, analysis); err != nil {
+		fmt.Printf("[错误分析索引][警告] 保存执行 #%d 的索引失败: %v\n", execID, err)
+	}
+	return analysis, nil
 }
 
 // StreamExecutionLog 流式读取执行日志
@@ -2968,60 +3361,120 @@ func StreamExecutionLog(id int64, writer io.Writer, stopChan chan struct{}) erro
 	}
 }
 
-// extractCSVDataSetFiles 从 JMX 内容中提取 CSVDataSet 的 filename
-func extractCSVDataSetFiles(jmxContent string) []string {
-	// 使用正则提取: <stringProp name="filename">(.*?)</stringProp>
-	// 在 CSVDataSet 元素中
-	var csvFiles []string
-	seen := make(map[string]bool)
+var runtimeDependencyPropNames = map[string]bool{
+	"File.path":                       true,
+	"filename":                        true,
+	"scriptFile":                      true,
+	"BeanShellSampler.filename":       true,
+	"BeanShellPreProcessor.filename":  true,
+	"BeanShellPostProcessor.filename": true,
+	"BSFSampler.filename":             true,
+	"BSFPreProcessor.filename":        true,
+	"BSFPostProcessor.filename":       true,
+	"JSR223Sampler.filename":          true,
+	"JSR223PreProcessor.filename":     true,
+	"JSR223PostProcessor.filename":    true,
+	"JSR223Assertion.filename":        true,
+	"JSR223Listener.filename":         true,
+	"HTTPSampler.file.path":           true,
+	"HTTPFileArg.path":                true,
+}
 
-	// 查找所有 CSVDataSet 元素
-	csvDataSetPattern := `<CSVDataSet[^>]*>[\s\S]*?<\/CSVDataSet>`
-	re := regexp.MustCompile(csvDataSetPattern)
-	matches := re.FindAllString(jmxContent, -1)
+func rewriteRuntimeDependencyProps(jmxContent string, rewriter func(propName, value string) (string, bool)) string {
+	stringPropRe := regexp.MustCompile(`<stringProp name="([^"]+)">(.*?)</stringProp>`)
+	return stringPropRe.ReplaceAllStringFunc(jmxContent, func(match string) string {
+		submatches := stringPropRe.FindStringSubmatch(match)
+		if len(submatches) < 3 {
+			return match
+		}
 
-	filenamePattern := `<stringProp name="filename">(.*?)<\/stringProp>`
-	filenameRe := regexp.MustCompile(filenamePattern)
+		propName := strings.TrimSpace(submatches[1])
+		value := strings.TrimSpace(submatches[2])
+		if !runtimeDependencyPropNames[propName] || !shouldTrackDependencyPath(value) {
+			return match
+		}
 
-	for _, match := range matches {
-		filenameMatches := filenameRe.FindStringSubmatch(match)
-		if len(filenameMatches) > 1 {
-			filename := filenameMatches[1]
-			if filename != "" && !seen[filename] {
-				seen[filename] = true
-				csvFiles = append(csvFiles, filename)
-			}
+		rewritten, changed := rewriter(propName, value)
+		if !changed {
+			return match
+		}
+
+		return `<stringProp name="` + propName + `">` + rewritten + `</stringProp>`
+	})
+}
+
+func absolutizeRuntimeDependencyPaths(jmxContent string, baseDir string) string {
+	baseDir = strings.TrimSpace(baseDir)
+	if baseDir == "" {
+		return jmxContent
+	}
+	absBaseDir, err := filepath.Abs(baseDir)
+	if err != nil {
+		absBaseDir = baseDir
+	}
+
+	return rewriteRuntimeDependencyProps(jmxContent, func(_ string, value string) (string, bool) {
+		if filepath.IsAbs(value) {
+			return "", false
+		}
+		return filepath.ToSlash(filepath.Join(absBaseDir, value)), true
+	})
+}
+
+func replaceFileDependencyPaths(jmxContent string, remoteDataDir string, fileNames []string) string {
+	fileNameMap := make(map[string]string, len(fileNames))
+	fileNameSet := make(map[string]bool, len(fileNames))
+	for _, name := range fileNames {
+		base := filepath.Base(strings.TrimSpace(name))
+		if base != "" {
+			fileNameSet[base] = true
+			fileNameMap[base] = base
 		}
 	}
 
-	return csvFiles
+	return replaceFileDependencyPathsWithMap(jmxContent, remoteDataDir, fileNameMap)
 }
 
-// replaceCSVDataSetPaths 替换 JMX 中 CSVDataSet 的 filename 路径和 shareMode
-func replaceCSVDataSetPaths(jmxContent string, csvDataDir string) string {
-	// 找到所有 <stringProp name="filename">xxx</stringProp>
-	// 将 xxx 替换为 csvDataDir + "/" + filepath.Base(xxx)
-	filenamePattern := `<stringProp name="filename">(.*?)<\/stringProp>`
-	re := regexp.MustCompile(filenamePattern)
-
-	result := re.ReplaceAllStringFunc(jmxContent, func(match string) string {
-		submatches := re.FindStringSubmatch(match)
-		if len(submatches) > 1 {
-			oldPath := submatches[1]
-			if oldPath != "" {
-				newPath := csvDataDir + "/" + filepath.Base(oldPath)
-				return `<stringProp name="filename">` + newPath + `</stringProp>`
-			}
+func replaceFileDependencyPathsWithMap(jmxContent string, remoteDataDir string, fileNameMap map[string]string) string {
+	return rewriteRuntimeDependencyProps(jmxContent, func(_ string, value string) (string, bool) {
+		value = strings.TrimSpace(value)
+		targetName, ok := fileNameMap[value]
+		if !ok {
+			targetName, ok = fileNameMap[filepath.Base(value)]
 		}
-		return match
+		if !ok || strings.TrimSpace(targetName) == "" {
+			return "", false
+		}
+		return filepath.ToSlash(filepath.Join(remoteDataDir, targetName)), true
 	})
+}
 
-	// 替换 shareMode 为 shareMode.all，确保拆分后每个 Slave 上的所有线程共享同一分片文件
-	shareModePattern := `<stringProp name="shareMode">shareMode\.\w+</stringProp>`
-	shareRe := regexp.MustCompile(shareModePattern)
-	result = shareRe.ReplaceAllString(result, `<stringProp name="shareMode">shareMode.all</stringProp>`)
+func resolveRuntimeDependencySourcePath(dep string, scriptDir string, attachedLookup map[string]string) (string, error) {
+	dep = strings.TrimSpace(dep)
+	if dep == "" {
+		return "", fmt.Errorf("依赖路径为空")
+	}
 
-	return result
+	if filepath.IsAbs(dep) {
+		if _, err := os.Stat(dep); err != nil {
+			return "", err
+		}
+		return dep, nil
+	}
+
+	base := filepath.Base(dep)
+	if attachedPath := strings.TrimSpace(attachedLookup[base]); attachedPath != "" {
+		if _, err := os.Stat(attachedPath); err == nil {
+			return attachedPath, nil
+		}
+	}
+
+	candidate := filepath.Join(scriptDir, dep)
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate, nil
+	}
+
+	return "", fmt.Errorf("文件不存在或不可读: %s", dep)
 }
 
 // copyFile 复制文件
@@ -3175,22 +3628,26 @@ func buildExecutionSummary(exec *model.Execution, summary map[string]interface{}
 		if v, ok := summary["total_samples"].(float64); ok {
 			es.TotalSamples = int64(v)
 		}
-		if v, ok := summary["avg_rt"].(float64); ok {
+		if v, ok := summary["avg_response_time"].(float64); ok {
 			es.AvgRT = v
 		}
-		if v, ok := summary["tps"].(float64); ok {
+		if v, ok := summary["transaction_tps"].(float64); ok {
+			es.TPS = v
+		} else if v, ok := summary["primary_throughput"].(float64); ok {
+			es.TPS = v
+		} else if v, ok := summary["throughput"].(float64); ok {
 			es.TPS = v
 		}
 		if v, ok := summary["error_rate"].(float64); ok {
 			es.ErrorRate = v
 		}
-		if v, ok := summary["p90_rt"].(float64); ok {
+		if v, ok := summary["p90"].(float64); ok {
 			es.P90RT = v
 		}
-		if v, ok := summary["p95_rt"].(float64); ok {
+		if v, ok := summary["p95"].(float64); ok {
 			es.P95RT = v
 		}
-		if v, ok := summary["p99_rt"].(float64); ok {
+		if v, ok := summary["p99"].(float64); ok {
 			es.P99RT = v
 		}
 	}
@@ -3209,12 +3666,13 @@ func calculateDifferences(summary1, summary2 map[string]interface{}) []MetricDif
 		unit           string
 		higherIsBetter bool
 	}{
-		{"avg_rt", "平均响应时间", "ms", false},
-		{"tps", "吞吐量", "req/s", true},
+		{"avg_response_time", "平均响应时间", "ms", false},
+		{"transaction_tps", "TPS（事务/s）", "tps", true},
+		{"request_rate", "请求次数（次/秒）", "req/s", true},
 		{"error_rate", "错误率", "%", false},
-		{"p90_rt", "P90响应时间", "ms", false},
-		{"p95_rt", "P95响应时间", "ms", false},
-		{"p99_rt", "P99响应时间", "ms", false},
+		{"p90", "P90响应时间", "ms", false},
+		{"p95", "P95响应时间", "ms", false},
+		{"p99", "P99响应时间", "ms", false},
 	}
 
 	for _, m := range metrics {

@@ -204,6 +204,13 @@ type DiagnosticResult struct {
 	Suggestion    string `json:"suggestion,omitempty"`
 }
 
+type CallbackReachabilityResult struct {
+	Reachable  bool   `json:"reachable"`
+	StatusCode int    `json:"status_code"`
+	LatencyMS  int64  `json:"latency_ms"`
+	Error      string `json:"error,omitempty"`
+}
+
 // classifyNetworkError 分类网络错误类型
 func classifyNetworkError(err error) string {
 	if err == nil {
@@ -256,6 +263,20 @@ func classifyNetworkError(err error) string {
 	}
 
 	return "unknown"
+}
+
+func CheckSlaveCallbackReachability(slave model.Slave, callbackURL string) (*CallbackReachabilityResult, error) {
+	client := NewAgentClient(slave.Host, slave.AgentPort, slave.AgentToken)
+	result, err := client.CheckCallback(callbackURL)
+	if err != nil {
+		return nil, err
+	}
+	return &CallbackReachabilityResult{
+		Reachable:  result.Reachable,
+		StatusCode: result.StatusCode,
+		LatencyMS:  result.LatencyMS,
+		Error:      result.Error,
+	}, nil
 }
 
 // generateSuggestion 根据诊断结果生成建议

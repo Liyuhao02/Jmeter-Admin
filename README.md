@@ -51,6 +51,32 @@ source ~/.bashrc
 # 访问 http://your-server-ip:8080
 ```
 
+### 服务器后台部署（master / agent / all）
+
+```bash
+# 先复制环境模板
+cp scripts/server-deploy.env.example scripts/server-deploy.env
+
+# 按需修改 agent 端口、token、jmeter 路径
+vim scripts/server-deploy.env
+
+# 一键后台部署 master
+./scripts/server-deploy.sh master deploy
+
+# 一键后台部署 agent
+./scripts/server-deploy.sh agent deploy
+
+# 同机同时部署 master + agent
+./scripts/server-deploy.sh all deploy
+
+# 自动安装依赖（Go / Node.js / Java / JMeter）
+./scripts/server-deploy.sh all install-deps
+
+# 查看状态 / 日志
+./scripts/server-deploy.sh all status
+./scripts/server-deploy.sh master logs
+```
+
 ### 本地开发
 
 ```bash

@@ -12,18 +12,23 @@ export const executionApi = {
   },
 
   // 创建执行（启动测试）
-  create(data) {
-    return request.post('/api/executions', data)
+  create(data, options = {}) {
+    return request.post('/api/executions', data, options)
   },
 
   // 获取执行详情
-  getDetail(id) {
-    return request.get(`/api/executions/${id}`)
+  getDetail(id, options = {}) {
+    return request.get(`/api/executions/${id}`, options)
   },
 
   // 获取执行中的实时指标
-  getLiveMetrics(id) {
-    return request.get(`/api/executions/${id}/live-metrics`)
+  getLiveMetrics(id, options = {}) {
+    return request.get(`/api/executions/${id}/live-metrics`, options)
+  },
+
+  // 获取执行节点的实时系统指标
+  getNodeMetrics(id, options = {}) {
+    return request.get(`/api/executions/${id}/node-metrics`, options)
   },
 
   // 停止执行
@@ -37,8 +42,8 @@ export const executionApi = {
   },
 
   // 获取错误分析
-  getErrors(id) {
-    return request.get(`/api/executions/${id}/errors`)
+  getErrors(id, options = {}) {
+    return request.get(`/api/executions/${id}/errors`, options)
   },
 
   // 下载 JTL 结果文件

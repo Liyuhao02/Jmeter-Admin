@@ -11,11 +11,11 @@
           <div class="script-info">
             <h1 class="script-name">{{ execution.script_name || '执行详情' }}</h1>
             <el-tag
-              :type="getStatusType(execution.status)"
+              :type="getStatusType(execution)"
               size="small"
               class="status-tag"
             >
-              {{ getStatusText(execution.status) }}
+              {{ getStatusText(execution) }}
             </el-tag>
           </div>
         </div>
@@ -124,7 +124,7 @@
         <div class="overview-hero">
           <div class="overview-status-strip">
             <span class="overview-status-dot" :class="`is-${overviewStatusTone}`"></span>
-            <span class="overview-status-text">{{ getStatusText(execution.status) }}</span>
+            <span class="overview-status-text">{{ getStatusText(execution) }}</span>
             <span class="overview-status-divider"></span>
             <span class="overview-status-note">{{ overviewStatusNote }}</span>
           </div>
@@ -157,6 +157,69 @@
       </div>
     </div>
 
+    <div v-if="diagnosticCards.length || diagnosticWarnings.length" class="section-card">
+      <div class="section-header">
+        <div class="section-label">DIAGNOSTICS</div>
+        <div class="section-title">执行诊断</div>
+      </div>
+      <div class="diagnostic-grid" v-if="diagnosticCards.length">
+        <div v-for="card in diagnosticCards" :key="card.key" class="diagnostic-card">
+          <div class="diagnostic-label">{{ card.label }}</div>
+          <div class="diagnostic-value" :class="`text-${card.color}`">{{ card.value }}</div>
+          <div class="diagnostic-caption">{{ card.caption }}</div>
+        </div>
+      </div>
+      <div v-if="diagnosticWarnings.length" class="diagnostic-warning-stack">
+        <div v-for="warning in diagnosticWarnings" :key="warning" class="diagnostic-warning-item">
+          <el-icon><WarningFilled /></el-icon>
+          <span>{{ warning }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 节点监控面板 - 仅运行中显示 -->
+    <div v-if="execution?.status === 'running' && nodeMetrics.length > 0" class="section-card node-metrics-panel">
+      <div class="section-header">
+        <div class="section-label">NODE MONITORING</div>
+        <div class="section-title">节点实时监控</div>
+      </div>
+      <div class="metrics-grid">
+        <div v-for="node in nodeMetrics" :key="node.id" class="node-card">
+          <div class="node-header">
+            <span class="node-name">{{ node.name }}</span>
+            <span class="node-role">{{ node.role === 'slave' ? 'Slave' : 'Master' }}</span>
+            <span class="node-status" :class="node.online ? 'online' : 'offline'">
+              {{ node.online ? '在线' : '离线' }}
+            </span>
+          </div>
+          <div v-if="node.stats" class="node-stats">
+            <div class="stat-item">
+              <span class="stat-label">CPU</span>
+              <el-progress :percentage="Math.round(node.stats.cpu?.percent || 0)" :stroke-width="6" 
+                :color="getResourceColor(node.stats.cpu?.percent || 0)" />
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">内存</span>
+              <el-progress :percentage="Math.round(node.stats.memory?.percent || 0)" :stroke-width="6"
+                :color="getResourceColor(node.stats.memory?.percent || 0)" />
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">磁盘</span>
+              <el-progress :percentage="Math.round(node.stats.disk?.percent || 0)" :stroke-width="6"
+                :color="getResourceColor(node.stats.disk?.percent || 0)" />
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">连接数</span>
+              <span class="stat-value">{{ node.stats.network?.connections || 0 }}</span>
+            </div>
+          </div>
+          <div v-else class="node-offline">
+            数据不可用
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="section-card">
       <div class="section-header">
         <div class="section-label">LIVE METRICS</div>
@@ -164,8 +227,8 @@
       </div>
       <div class="live-metrics-summary">
         <div class="live-summary-card">
-          <span class="live-summary-label">{{ isExecutionRunning ? '当前 TPS' : '峰值 TPS' }}</span>
-          <span class="live-summary-value text-blue">{{ formatNumber(primaryMetricValue('tps')) || '-' }}</span>
+          <span class="live-summary-label">{{ livePrimaryThroughputTitle }}</span>
+          <span class="live-summary-value text-blue">{{ formatNumber(primaryMetricValue('primary_throughput')) || '-' }}</span>
         </div>
         <div class="live-summary-card">
           <span class="live-summary-label">{{ isExecutionRunning ? '请求次数（次/秒）' : '峰值请求次数（次/秒）' }}</span>
@@ -190,16 +253,16 @@
       </div>
       <div class="live-charts-grid">
         <MetricTrendChart
-          title="TPS 趋势"
-          :value="formatNumber(primaryMetricValue('tps'))"
-          unit="req/s"
-          :subline="chartSubline('tps')"
+          :title="livePrimaryThroughputChartTitle"
+          :value="formatNumber(primaryMetricValue('primary_throughput'))"
+          :unit="livePrimaryThroughputUnit"
+          :subline="chartSubline('primary_throughput')"
           :points="liveMetrics.points || []"
-          field="tps"
+          :field="livePrimaryThroughputField"
           color="#38bdf8"
           :show-expand="true"
           :max-x-ticks="4"
-          @expand="openExpandedChart('tps')"
+          @expand="openExpandedChart('primary_throughput')"
         />
         <MetricTrendChart
           title="请求次数（次/秒）"
@@ -982,6 +1045,11 @@ import MetricTrendChart from '@/components/MetricTrendChart.vue'
 const route = useRoute()
 const router = useRouter()
 const executionId = computed(() => route.params.id)
+const executionNumericId = computed(() => {
+  const value = Number.parseInt(route.params.id, 10)
+  return Number.isFinite(value) ? value : null
+})
+const hasValidExecutionId = computed(() => executionNumericId.value !== null)
 
 const loading = ref(false)
 const stopping = ref(false)
@@ -1001,10 +1069,11 @@ const liveMetrics = ref({ points: [] })
 const detailRefreshing = ref(false)
 const liveRefreshing = ref(false)
 const errorAnalysisLoaded = ref(false)
-const LIVE_REFRESH_INTERVAL = 3000
 const nowTick = ref(Date.now())
 const expandedChartKey = ref('')
 const expandedChartVisible = ref(false)
+const pageVisible = ref(typeof document === 'undefined' ? true : document.visibilityState === 'visible')
+let leavingPage = false
 
 // 错误分析相关
 const errorAnalysis = ref(null)
@@ -1031,6 +1100,10 @@ const errorDetailTab = ref('request')
 // 基准线对比相关
 const baselineComparison = ref(null)
 const baselineLoading = ref(false)
+
+// 节点监控相关
+const nodeMetrics = ref([])
+let metricsTimer = null
 
 const showErrorDetail = (record) => {
   currentErrorRecord.value = record
@@ -1085,6 +1158,46 @@ const hasErrors = computed(() => {
 
 const hasLiveMetrics = computed(() => Array.isArray(liveMetrics.value?.points) && liveMetrics.value.points.length > 0)
 const isExecutionRunning = computed(() => execution.value.status === 'running')
+const diagnostics = computed(() => execution.value?.diagnostics || {})
+
+const summaryPrimaryThroughputLabel = computed(() => {
+  return summary.value.primary_throughput_label || (Number(summary.value.transaction_samples || 0) > 0 ? 'TPS（事务/s）' : '请求次数（次/秒）')
+})
+
+const summaryPrimaryThroughputUnit = computed(() => {
+  return summary.value.primary_throughput_unit || (Number(summary.value.transaction_samples || 0) > 0 ? 'tps' : 'req/s')
+})
+
+const summaryPrimaryThroughputField = computed(() => {
+  return summary.value.primary_throughput_field || (Number(summary.value.transaction_samples || 0) > 0 ? 'transaction_tps' : 'request_rate')
+})
+
+const summaryPrimaryThroughputValue = computed(() => {
+  const field = summaryPrimaryThroughputField.value
+  if (field && summary.value[field] !== undefined) {
+    return summary.value[field]
+  }
+  return summary.value.primary_throughput ?? summary.value.request_rate ?? summary.value.transaction_tps ?? summary.value.throughput ?? null
+})
+
+const livePrimaryThroughputTitle = computed(() => {
+  if (isExecutionRunning.value) {
+    return `当前 ${liveMetrics.value.primary_throughput_label || summaryPrimaryThroughputLabel.value}`
+  }
+  return `峰值 ${liveMetrics.value.primary_throughput_label || summaryPrimaryThroughputLabel.value}`
+})
+
+const livePrimaryThroughputChartTitle = computed(() => {
+  return `${liveMetrics.value.primary_throughput_label || summaryPrimaryThroughputLabel.value}趋势`
+})
+
+const livePrimaryThroughputField = computed(() => {
+  return liveMetrics.value.primary_throughput_field || (liveMetrics.value.has_transaction_samples ? 'tps' : 'request_rate')
+})
+
+const livePrimaryThroughputUnit = computed(() => {
+  return liveMetrics.value.primary_throughput_unit || (liveMetrics.value.has_transaction_samples ? 'tps' : 'req/s')
+})
 
 const summaryCounts = computed(() => {
   const total = isExecutionRunning.value
@@ -1093,44 +1206,42 @@ const summaryCounts = computed(() => {
   const errors = isExecutionRunning.value
     ? Number(liveMetrics.value.error_requests ?? errorAnalysis.value?.total_errors ?? 0)
     : Number(summary.value.error_samples ?? errorAnalysis.value?.total_errors ?? 0)
-  const success = Number(summary.value.success_samples ?? Math.max(total - errors, 0))
+  const success = isExecutionRunning.value
+    ? Number(liveMetrics.value.success_requests ?? Math.max(total - errors, 0))
+    : Number(summary.value.request_success_samples ?? summary.value.success_samples ?? Math.max(total - errors, 0))
   return { total, success, errors }
 })
 
 const overviewStatusTone = computed(() => {
-  if (execution.value.status === 'failed') return 'danger'
-  if (execution.value.status === 'running') return 'info'
-  if (getErrorRateValue(summary.value.error_rate) > 5) return 'warning'
-  return 'success'
+  return execution.value.status_tone || (execution.value.status === 'failed' ? 'danger' : execution.value.status === 'running' ? 'info' : getErrorRateValue(summary.value.error_rate) > 5 ? 'warning' : 'success')
 })
 
 const overviewStatusNote = computed(() => {
-  if (execution.value.status === 'running') return '实时指标持续刷新中'
-  if (execution.value.status === 'failed') return '本次执行存在明显失败样本'
-  if (getErrorRateValue(summary.value.error_rate) > 0) return '执行完成，但存在错误请求'
-  return '执行完成，整体表现稳定'
+  return execution.value.status_reason || (execution.value.status === 'running' ? '实时指标持续刷新中' : execution.value.status === 'failed' ? '本次执行存在明显失败样本' : getErrorRateValue(summary.value.error_rate) > 0 ? '执行完成，但存在错误请求' : '执行完成，整体表现稳定')
 })
 
 const overviewPrimaryMetrics = computed(() => {
   const s = summary.value
   const live = liveMetrics.value || {}
   const throughputValue = isExecutionRunning.value
-    ? live.current_request_rate
-    : s.throughput
+    ? live.current_primary_throughput
+    : summaryPrimaryThroughputValue.value
   const avgResponseTime = isExecutionRunning.value
     ? live.avg_rt
     : s.avg_response_time
+  const throughputLabel = live.primary_throughput_label || summaryPrimaryThroughputLabel.value
+  const throughputUnit = livePrimaryThroughputUnit.value
   const throughputCaption = isExecutionRunning.value
-    ? `当前 ${formatNumber(live.current_request_rate)} req/s / 平均 ${formatNumber(live.avg_request_rate)} req/s`
+    ? `当前 ${formatNumber(live.current_primary_throughput)} ${throughputUnit} / 平均 ${formatNumber(live.avg_primary_throughput)} ${throughputUnit} / 峰值 ${formatNumber(live.peak_primary_throughput)} ${throughputUnit}`
     : s.sample_span_ms ? `基于 ${formatDurationFromMs(s.sample_span_ms)} 真实采样跨度` : '等待采样结果'
   const latencyCaption = isExecutionRunning.value
-    ? `当前 ${live.current_rt ? `${formatNumber(live.current_rt)} ms` : '-'} / 峰值TPS ${formatNumber(live.peak_tps)}`
+    ? `当前 ${live.current_rt ? `${formatNumber(live.current_rt)} ms` : '-'} / 请求速率 ${formatNumber(live.current_request_rate)} req/s`
     : s.p95 ? `P95 ${formatNumber(s.p95)} ms / P99 ${formatNumber(s.p99)} ms` : '等待延迟分布统计'
   return [
     {
       key: 'throughput',
-      label: '吞吐量',
-      value: throughputValue ? `${formatNumber(throughputValue)} req/s` : '-',
+      label: throughputLabel,
+      value: throughputValue ? `${formatNumber(throughputValue)} ${throughputUnit}` : '-',
       caption: throughputCaption,
       tone: 'throughput'
     },
@@ -1206,6 +1317,91 @@ const overviewMiniMetrics = computed(() => {
   ]
 })
 
+const diagnosticCards = computed(() => {
+  const diag = diagnostics.value || {}
+  const modeMap = {
+    local: '本地执行',
+    distributed: '分布式执行',
+    distributed_with_master: 'Master + Slave'
+  }
+  const detailStateMap = {
+    disabled: '未开启',
+    pending: '等待写入',
+    local_captured: '本地已采集',
+    partial: '部分到位',
+    complete: '采集完整',
+    missing: '未生成'
+  }
+  const resultReady = diag.result_merge_ready ? '已就绪' : '等待中'
+  const resultCaption = Array.isArray(diag.result_files)
+    ? diag.result_files.filter(item => item.exists).map(item => item.label).join(' / ') || '尚未生成任何结果文件'
+    : '暂无结果文件信息'
+  const detailCaption = diag.save_http_details
+    ? `已回传 ${diag.received_detail_sources?.length || 0} / 预期 ${diag.expected_detail_sources?.length || 0}`
+    : '当前执行未开启失败请求明细'
+  const dependencyCaption = diag.csv_dependencies?.length || diag.file_dependencies?.length || diag.plugin_dependencies?.length
+    ? `CSV ${diag.csv_dependencies?.length || 0} / 文件 ${diag.file_dependencies?.length || 0} / 插件 ${diag.plugin_dependencies?.length || 0}`
+    : '未检测到额外依赖'
+  const cards = [
+    {
+      key: 'mode',
+      label: '执行模式',
+      value: modeMap[diag.mode] || '本地执行',
+      caption: diag.slave_hosts?.length ? `节点 ${diag.slave_hosts.join('、')}` : '当前未选择 Slave 节点',
+      color: 'blue'
+    },
+    {
+      key: 'result',
+      label: '结果链路',
+      value: resultReady,
+      caption: resultCaption,
+      color: diag.result_merge_ready ? 'green' : 'warning'
+    },
+    {
+      key: 'details',
+      label: 'HTTP 明细',
+      value: detailStateMap[diag.detail_state] || '未开启',
+      caption: detailCaption,
+      color: diag.detail_state === 'complete' || diag.detail_state === 'local_captured' ? 'green' : diag.detail_state === 'disabled' ? 'blue' : 'warning'
+    },
+    {
+      key: 'dependencies',
+      label: '依赖概况',
+      value: diag.split_csv ? '已启用 CSV 分片' : '按原脚本执行',
+      caption: dependencyCaption,
+      color: diag.warnings?.length ? 'warning' : 'blue'
+    }
+  ]
+
+  if (diag.mode && diag.mode !== 'local') {
+    cards.push({
+      key: 'topology',
+      label: '拓扑说明',
+      value: diag.include_master ? 'Master 参与施压' : 'Master 仅调度',
+      caption: `Slave ${diag.slave_count || 0} 台 / CSV分片 ${diag.split_csv ? '开启' : '关闭'}`,
+      color: diag.include_master ? 'green' : 'blue'
+    })
+  }
+
+  if (diag.save_http_details) {
+    cards.push({
+      key: 'detail-sources',
+      label: '明细回传',
+      value: `${diag.received_detail_sources?.length || 0}/${diag.expected_detail_sources?.length || 0}`,
+      caption: (diag.missing_detail_sources?.length
+        ? `缺失节点：${diag.missing_detail_sources.join('、')}`
+        : '所有预期节点均已回传 HTTP 明细'),
+      color: diag.missing_detail_sources?.length ? 'warning' : 'green'
+    })
+  }
+
+  return cards
+})
+
+const diagnosticWarnings = computed(() => {
+  return diagnostics.value?.warnings || []
+})
+
 const summaryMeta = computed(() => {
   const s = summary.value
   return [
@@ -1225,11 +1421,13 @@ const detailStatGroups = computed(() => {
       title: '请求概况',
       items: [
         { name: '总样本数', value: formatNumber(isExecutionRunning.value ? live.total_requests : s.total_samples) },
-        { name: '成功样本', value: formatNumber(isExecutionRunning.value ? live.success_requests : s.success_samples) },
-        { name: '错误样本', value: formatNumber(isExecutionRunning.value ? live.error_requests : s.error_samples) },
+        { name: '请求成功样本', value: formatNumber(isExecutionRunning.value ? live.success_requests : (s.request_success_samples ?? s.success_samples)) },
+        { name: '请求错误样本', value: formatNumber(isExecutionRunning.value ? live.error_requests : (s.request_error_samples ?? s.error_samples)) },
+        { name: '事务样本数', value: formatNumber(isExecutionRunning.value ? live.total_transactions : s.transaction_samples) },
         { name: '错误率', value: (isExecutionRunning.value ? live.error_rate : s.error_rate) !== undefined ? `${formatNumber(isExecutionRunning.value ? live.error_rate : s.error_rate)}%` : '-' },
         { name: '成功率', value: (isExecutionRunning.value ? live.success_rate : s.success_rate) !== undefined ? `${formatNumber(isExecutionRunning.value ? live.success_rate : s.success_rate)}%` : '-' },
-        { name: '吞吐量', value: isExecutionRunning.value ? `${formatNumber(live.current_request_rate)} req/s` : s.throughput ? `${formatNumber(s.throughput)} req/s` : '-' }
+        { name: summaryPrimaryThroughputLabel.value, value: isExecutionRunning.value ? `${formatNumber(live.current_primary_throughput)} ${livePrimaryThroughputUnit.value}` : summaryPrimaryThroughputValue.value !== null ? `${formatNumber(summaryPrimaryThroughputValue.value)} ${summaryPrimaryThroughputUnit.value}` : '-' },
+        { name: '请求次数（次/秒）', value: isExecutionRunning.value ? `${formatNumber(live.current_request_rate)} req/s` : s.request_rate ? `${formatNumber(s.request_rate)} req/s` : '-' }
       ]
     },
     {
@@ -1314,10 +1512,18 @@ const formatErrorRecords = computed(() => {
 
 // 响应码颜色映射（用于饼图）
 const getResponseCodeColor = (code) => {
-  if (code?.startsWith('5')) return '#ef4444'  // 5xx 红色
-  if (code?.startsWith('4')) return '#f59e0b'  // 4xx 橙色
-  if (code?.includes('Exception') || code?.includes('error') || code?.includes('Non HTTP')) return '#a855f7'  // 连接错误 紫色
-  return '#6b7280'  // 其他灰色
+  if (!code) return '#8c8c8c'  // 未知 - 中灰
+  // 5xx 服务器错误
+  if (code.startsWith('5')) return '#ff4d4f'  // 亮红
+  // 4xx 客户端错误
+  if (code.startsWith('4')) return '#faad14'  // 金黄
+  // 3xx 重定向
+  if (code.startsWith('3')) return '#1890ff'  // 蓝色
+  // 2xx 成功
+  if (code.startsWith('2')) return '#52c41a'  // 绿色
+  // 连接/异常错误
+  if (code.includes('Exception') || code.includes('error') || code.includes('Non HTTP')) return '#ff7a45'  // 橙红
+  return '#8c8c8c'  // 其他 - 中灰
 }
 
 // 饼图数据计算
@@ -1345,7 +1551,7 @@ const pieSegments = computed(() => {
 const errorTimelinePoints = computed(() => {
   const timeline = errorAnalysis.value?.error_timeline || []
   return timeline.map(p => ({
-    timestamp: p.minute,
+    timestamp: p.time_bucket,
     error_count: p.error_count,
     error_rate: p.error_rate
   }))
@@ -1440,24 +1646,76 @@ const getErrorCodeColor = (code) => {
 
 // 获取状态类型
 const getStatusType = (status) => {
+  const normalized = typeof status === 'object' ? (status?.status_tone || status?.status || 'info') : status
   const map = {
     running: 'primary',
     success: 'success',
     failed: 'danger',
-    stopped: 'warning'
+    stopped: 'warning',
+    info: 'primary',
+    warning: 'warning',
+    danger: 'danger'
   }
-  return map[status] || 'info'
+  return map[normalized] || 'info'
 }
 
 // 获取状态显示文本
 const getStatusText = (status) => {
+  const normalized = typeof status === 'object' ? (status?.display_status || status?.status) : status
   const textMap = {
     running: '运行中',
     success: '成功',
+    completed_success: '完成(全部成功)',
+    completed_with_errors: '完成(部分失败)',
+    completed_all_failed: '完成(全部失败)',
+    completed_no_samples: '完成(无有效样本)',
+    process_failed: '执行失败',
     failed: '失败',
     stopped: '已停止'
   }
-  return textMap[status] || status
+  return textMap[normalized] || normalized
+}
+
+// 获取资源颜色（用于节点监控进度条）
+const getResourceColor = (percent) => {
+  if (percent >= 90) return '#ff4d4f'
+  if (percent >= 70) return '#faad14'
+  return '#52c41a'
+}
+
+// 获取节点监控数据
+const fetchNodeMetrics = async () => {
+  if (leavingPage || !hasValidExecutionId.value || execution.value?.status !== 'running') {
+    nodeMetrics.value = []
+    if (metricsTimer) {
+      clearInterval(metricsTimer)
+      metricsTimer = null
+    }
+    return
+  }
+  try {
+    const res = await executionApi.getNodeMetrics(executionNumericId.value, { silent: true })
+    nodeMetrics.value = (res.data?.nodes || []).map(node => {
+      const stats = node.system_stats ? JSON.parse(node.system_stats) : null
+      return { ...node, stats }
+    })
+  } catch (e) {
+    console.error('获取节点监控失败:', e)
+  }
+}
+
+// 启动节点监控轮询
+const startMetricsPolling = () => {
+  fetchNodeMetrics()
+}
+
+// 停止节点监控轮询
+const stopMetricsPolling = () => {
+  if (metricsTimer) {
+    clearInterval(metricsTimer)
+    metricsTimer = null
+  }
+  nodeMetrics.value = []
 }
 
 // 获取报告占位文本
@@ -1573,11 +1831,11 @@ const getMetricValueClass = (item) => {
   if (item.name === '总样本数') classes.push('text-blue')
   if (item.name === '平均响应时间') classes.push('text-purple')
   if (item.name.includes('P')) classes.push('text-purple')
-  if (item.name === '吞吐量') classes.push('text-green')
+  if (item.name.includes('TPS') || item.name.includes('请求次数')) classes.push('text-green')
   if (item.name.includes('成功')) classes.push('text-green')
   if (item.name.includes('错误样本')) classes.push('text-red')
   if (item.name === '错误率') {
-    const errorRate = getErrorRateValue(summary.value.error_rate)
+    const errorRate = getErrorRateValue(isExecutionRunning.value ? liveMetrics.value.error_rate : summary.value.error_rate)
     classes.push(errorRate > 5 ? 'text-red' : 'text-green')
   }
   return classes
@@ -1585,14 +1843,17 @@ const getMetricValueClass = (item) => {
 
 // 获取执行详情
 const fetchExecutionDetail = async () => {
+  if (leavingPage || !hasValidExecutionId.value) return
   if (detailRefreshing.value) return
   detailRefreshing.value = true
-  loading.value = true
+  if (!execution.value?.id) {
+    loading.value = true
+  }
   try {
-    const res = await executionApi.getDetail(executionId.value)
+    const res = await executionApi.getDetail(executionNumericId.value, { silent: true })
     execution.value = res.data || {}
     // 加载完成后尝试加载基准线对比
-    if (execution.value.status === 'success' && !execution.value.is_baseline) {
+    if (execution.value.status === 'success' && !execution.value.is_baseline && !baselineComparison.value && !baselineLoading.value) {
       loadBaselineComparison()
     }
   } catch (error) {
@@ -1628,11 +1889,11 @@ const loadBaselineComparison = async () => {
 
 // 获取错误分析数据
 const fetchErrors = async () => {
-  if (!executionId.value) return
+  if (leavingPage || !hasValidExecutionId.value) return
   if (errorLoading.value) return
   errorLoading.value = true
   try {
-    const res = await executionApi.getErrors(executionId.value)
+    const res = await executionApi.getErrors(executionNumericId.value, { silent: true })
     errorAnalysis.value = res.data
     errorPage.value = 1
     errorAnalysisLoaded.value = true
@@ -1644,11 +1905,11 @@ const fetchErrors = async () => {
 }
 
 const fetchLiveMetrics = async () => {
-  if (!executionId.value) return
+  if (leavingPage || !hasValidExecutionId.value) return
   if (liveRefreshing.value) return
   liveRefreshing.value = true
   try {
-    const res = await executionApi.getLiveMetrics(executionId.value)
+    const res = await executionApi.getLiveMetrics(executionNumericId.value, { silent: true })
     liveMetrics.value = res.data || { points: [] }
   } catch (error) {
     console.error('获取实时指标失败:', error)
@@ -1658,12 +1919,6 @@ const fetchLiveMetrics = async () => {
 }
 
 const maybeFetchErrors = async (force = false) => {
-  if (!force && execution.value.status === 'running' && errorActiveTab.value !== 'records' && errorActiveTab.value !== 'types') {
-    return
-  }
-  if (!force && execution.value.status === 'running' && errorActiveTab.value !== 'records' && errorActiveTab.value !== 'types') {
-    return
-  }
   if (!force && execution.value.status === 'running' && !errorAnalysisLoaded.value) {
     return
   }
@@ -1672,12 +1927,12 @@ const maybeFetchErrors = async (force = false) => {
 
 const expandedChartConfig = computed(() => {
   const configs = {
-    tps: {
-      title: 'TPS 趋势',
-      value: formatNumber(primaryMetricValue('tps')),
-      unit: 'req/s',
-      subline: chartSubline('tps'),
-      field: 'tps',
+    primary_throughput: {
+      title: livePrimaryThroughputChartTitle.value,
+      value: formatNumber(primaryMetricValue('primary_throughput')),
+      unit: livePrimaryThroughputUnit.value,
+      subline: chartSubline('primary_throughput'),
+      field: livePrimaryThroughputField.value,
       color: '#38bdf8'
     },
     request_rate: {
@@ -1751,6 +2006,8 @@ const expandedChartConfig = computed(() => {
 const primaryMetricValue = (metricKey) => {
   const metrics = liveMetrics.value || {}
   switch (metricKey) {
+    case 'primary_throughput':
+      return isExecutionRunning.value ? metrics.current_primary_throughput : metrics.peak_primary_throughput
     case 'tps':
       return isExecutionRunning.value ? metrics.current_tps : metrics.peak_tps
     case 'request_rate':
@@ -1775,6 +2032,10 @@ const primaryMetricValue = (metricKey) => {
 const chartSubline = (metricKey) => {
   const metrics = liveMetrics.value || {}
   switch (metricKey) {
+    case 'primary_throughput':
+      return isExecutionRunning.value
+        ? `当前值 ${formatNumber(metrics.current_primary_throughput) || '-'} ${livePrimaryThroughputUnit.value} / 平均 ${formatNumber(metrics.avg_primary_throughput) || '-'} ${livePrimaryThroughputUnit.value} / 峰值 ${formatNumber(metrics.peak_primary_throughput) || '-'} ${livePrimaryThroughputUnit.value}`
+        : `执行已结束，展示峰值 ${formatNumber(metrics.peak_primary_throughput) || '-'} ${livePrimaryThroughputUnit.value} / 平均 ${formatNumber(metrics.avg_primary_throughput) || '-'} ${livePrimaryThroughputUnit.value}`
     case 'tps':
       return isExecutionRunning.value
         ? `当前值 ${formatNumber(metrics.current_tps) || '-'} / 平均 ${formatNumber(metrics.avg_tps) || '-'} / 峰值 ${formatNumber(metrics.peak_tps) || '-'}`
@@ -1841,10 +2102,11 @@ const scheduleLogFlush = () => {
 
 // 获取日志快照
 const fetchLog = async () => {
+  if (leavingPage || !hasValidExecutionId.value) return
   if (logSnapshotLoading.value) return
   logSnapshotLoading.value = true
   try {
-    const res = await fetch(`/api/executions/${executionId.value}/log?snapshot=1&tail=${MAX_LOG_LINES}`)
+    const res = await fetch(`/api/executions/${executionNumericId.value}/log?snapshot=1&tail=${MAX_LOG_LINES}`)
     const text = await res.text()
     setLogLines(text.split('\n').filter(line => line.trim() !== ''))
     nextTick(() => {
@@ -2009,6 +2271,23 @@ const refreshLog = () => {
   fetchLog()
 }
 
+const getAutoRefreshInterval = () => {
+  if (!pageVisible.value) return 6000
+  if (execution.value.status === 'running') return 2500
+  return 8000
+}
+
+const handleVisibilityChange = () => {
+  pageVisible.value = document.visibilityState === 'visible'
+  if (!leavingPage) {
+    if (pageVisible.value && hasValidExecutionId.value) {
+      fetchExecutionDetail()
+      fetchLiveMetrics()
+    }
+    setupAutoRefresh()
+  }
+}
+
 // 停止执行
 const handleStop = async () => {
   try {
@@ -2076,12 +2355,23 @@ const setupAutoRefresh = () => {
   if (refreshTimer.value) {
     clearInterval(refreshTimer.value)
   }
+  let detailTick = 0
   refreshTimer.value = setInterval(() => {
+    if (leavingPage || !hasValidExecutionId.value) return
+    detailTick += 1
     if (execution.value.status === 'running') {
-      fetchExecutionDetail()
       fetchLiveMetrics()
+      if (detailTick % 2 === 0) {
+        fetchExecutionDetail()
+        fetchNodeMetrics()
+      }
+      if (detailTick % 3 === 0) {
+        fetchErrors()
+      }
+    } else if (detailTick % 2 === 0) {
+      fetchExecutionDetail()
     }
-  }, LIVE_REFRESH_INTERVAL)
+  }, getAutoRefreshInterval())
 }
 
 const setupDurationTicker = () => {
@@ -2096,25 +2386,44 @@ const setupDurationTicker = () => {
 }
 
 onMounted(() => {
-  fetchExecutionDetail().then(() => {
-    fetchLiveMetrics()
-    fetchLog()
+  leavingPage = false
+  Promise.allSettled([fetchExecutionDetail(), fetchLiveMetrics()]).then(() => {
     if (execution.value.status !== 'running') {
+      fetchErrors()
+    } else {
+      // 执行运行中时启动节点监控
+      startMetricsPolling()
       fetchErrors()
     }
     setupAutoRefresh()
     setupDurationTicker()
+    setTimeout(() => {
+      if (!leavingPage) {
+        fetchLog()
+      }
+    }, 120)
   })
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+  }
 })
 
 watch(() => execution.value.status, (status, prevStatus) => {
   if (status && status !== 'running' && status !== prevStatus && !errorAnalysisLoaded.value) {
     fetchErrors()
   }
+  // 节点监控启停逻辑
+  if (status === 'running' && prevStatus !== 'running') {
+    startMetricsPolling()
+  } else if (status !== 'running' && prevStatus === 'running') {
+    stopMetricsPolling()
+  }
 })
 
 onBeforeUnmount(() => {
+  leavingPage = true
   stopLogStream()
+  stopMetricsPolling()
   if (refreshTimer.value) {
     clearInterval(refreshTimer.value)
     refreshTimer.value = null
@@ -2122,6 +2431,9 @@ onBeforeUnmount(() => {
   if (durationTimer.value) {
     clearInterval(durationTimer.value)
     durationTimer.value = null
+  }
+  if (typeof document !== 'undefined') {
+    document.removeEventListener('visibilitychange', handleVisibilityChange)
   }
 })
 </script>
@@ -2536,6 +2848,69 @@ onBeforeUnmount(() => {
 .text-purple { color: var(--accent-purple); }
 .text-green { color: var(--accent-green); }
 .text-red { color: var(--accent-red); }
+.text-warning { color: #f59e0b; }
+
+.diagnostic-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.diagnostic-card {
+  min-height: 128px;
+  padding: 18px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.diagnostic-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.diagnostic-value {
+  color: var(--text-primary);
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.1;
+  word-break: break-word;
+}
+
+.diagnostic-caption {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.diagnostic-warning-stack {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.diagnostic-warning-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.18);
+  line-height: 1.6;
+}
+
+.diagnostic-warning-item .el-icon {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
 
 // 详细统计
 .stats-meta-row {
@@ -3530,6 +3905,10 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 
+  .diagnostic-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .live-charts-grid {
     grid-template-columns: 1fr;
   }
@@ -3557,7 +3936,8 @@ onBeforeUnmount(() => {
 @media (max-width: 768px) {
   .overview-hero,
   .overview-mini-card,
-  .overview-primary-card {
+  .overview-primary-card,
+  .diagnostic-card {
     padding: 16px;
   }
 
@@ -3565,6 +3945,7 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 
+  .diagnostic-grid,
   .live-metrics-summary {
     grid-template-columns: 1fr;
   }
@@ -3586,6 +3967,118 @@ onBeforeUnmount(() => {
   .header-right {
     width: 100%;
     justify-content: space-between;
+  }
+}
+
+// 节点监控面板样式
+.node-metrics-panel {
+  .metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  
+  .node-card {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 16px;
+    transition: all 0.25s ease;
+    
+    &:hover {
+      background: rgba(255, 255, 255, 0.06);
+      border-color: rgba(255, 255, 255, 0.12);
+    }
+  }
+  
+  .node-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    
+    .node-name {
+      color: var(--text-primary);
+      font-weight: 600;
+      font-size: 15px;
+    }
+    
+    .node-role {
+      color: var(--text-secondary);
+      font-size: 12px;
+      background: rgba(255, 255, 255, 0.06);
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+    
+    .node-status {
+      margin-left: auto;
+      font-size: 12px;
+      font-weight: 500;
+      padding: 2px 8px;
+      border-radius: 4px;
+      
+      &.online {
+        color: #52c41a;
+        background: rgba(82, 196, 26, 0.15);
+      }
+      
+      &.offline {
+        color: #ff4d4f;
+        background: rgba(255, 77, 79, 0.15);
+      }
+    }
+  }
+  
+  .node-stats {
+    .stat-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+      
+      &:last-child {
+        margin-bottom: 0;
+      }
+      
+      .stat-label {
+        color: var(--text-secondary);
+        font-size: 13px;
+        width: 48px;
+        flex-shrink: 0;
+      }
+      
+      :deep(.el-progress) {
+        flex: 1;
+      }
+      
+      .stat-value {
+        color: var(--text-primary);
+        font-size: 14px;
+        font-weight: 500;
+        min-width: 40px;
+        text-align: right;
+      }
+    }
+  }
+  
+  .node-offline {
+    color: var(--text-secondary);
+    font-size: 13px;
+    text-align: center;
+    padding: 20px 0;
+    font-style: italic;
+  }
+}
+
+// 响应式适配
+@media (max-width: 768px) {
+  .node-metrics-panel {
+    .metrics-grid {
+      grid-template-columns: 1fr;
+    }
   }
 }
 </style>

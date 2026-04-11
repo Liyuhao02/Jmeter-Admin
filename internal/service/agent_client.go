@@ -18,6 +18,26 @@ type AgentClient struct {
 	Token string
 }
 
+type AgentCallbackCheckResult struct {
+	Reachable  bool   `json:"reachable"`
+	StatusCode int    `json:"status_code"`
+	LatencyMS  int64  `json:"latency_ms"`
+	Error      string `json:"error,omitempty"`
+}
+
+type AgentEnvironmentReport struct {
+	AgentVersion          string   `json:"agent_version"`
+	JMeterPath            string   `json:"jmeter_path"`
+	JMeterHome            string   `json:"jmeter_home"`
+	JMeterVersion         string   `json:"jmeter_version"`
+	JMeterVersionRaw      string   `json:"jmeter_version_raw"`
+	PluginJars            []string `json:"plugin_jars"`
+	PluginFingerprint     string   `json:"plugin_fingerprint"`
+	PropertiesLines       []string `json:"properties_lines"`
+	PropertiesFingerprint string   `json:"properties_fingerprint"`
+	Warnings              []string `json:"warnings,omitempty"`
+}
+
 // NewAgentClient 从 Slave 模型创建客户端
 func NewAgentClient(host string, port int, token string) *AgentClient {
 	return &AgentClient{
@@ -177,4 +197,62 @@ func (c *AgentClient) Health() error {
 	}
 
 	return nil
+}
+
+func (c *AgentClient) CheckCallback(targetURL string) (*AgentCallbackCheckResult, error) {
+	payload, err := json.Marshal(map[string]string{"url": targetURL})
+	if err != nil {
+		return nil, fmt.Errorf("序列化回调检测请求失败: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, c.getBaseURL()+"/api/network/check-callback", bytes.NewBuffer(payload))
+	if err != nil {
+		return nil, fmt.Errorf("创建回调检测请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setAuthHeader(req)
+
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("回调检测请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("回调检测失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+	}
+
+	var result AgentCallbackCheckResult
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("解析回调检测响应失败: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *AgentClient) GetEnvironmentReport() (*AgentEnvironmentReport, error) {
+	req, err := http.NewRequest(http.MethodGet, c.getBaseURL()+"/api/environment/report", nil)
+	if err != nil {
+		return nil, fmt.Errorf("创建环境报告请求失败: %w", err)
+	}
+	c.setAuthHeader(req)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("环境报告请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("获取环境报告失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+	}
+
+	var report AgentEnvironmentReport
+	if err := json.Unmarshal(body, &report); err != nil {
+		return nil, fmt.Errorf("解析环境报告失败: %w", err)
+	}
+	return &report, nil
 }

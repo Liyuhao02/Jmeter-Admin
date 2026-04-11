@@ -26,6 +26,7 @@ func SetupRouter(frontendFS embed.FS) *gin.Engine {
 			scripts.GET("", handler.ListScripts)
 			scripts.POST("", handler.CreateScript)
 			scripts.GET("/:id", handler.GetScript)
+			scripts.GET("/:id/dependencies", handler.GetScriptDependencies)
 			scripts.PUT("/:id", handler.UpdateScript)
 			scripts.DELETE("/:id", handler.DeleteScript)
 			scripts.GET("/:id/download", handler.DownloadScript)
@@ -55,9 +56,11 @@ func SetupRouter(frontendFS embed.FS) *gin.Engine {
 			executions.GET("", handler.ListExecutions)
 			executions.GET("/stats", handler.GetExecutionStats)   // 统计汇总API
 			executions.GET("/compare", handler.CompareExecutions) // 执行对比API（放在 /:id 之前）
+			executions.GET("/callback-probe", handler.CallbackProbe)
 			executions.POST("", handler.CreateExecution)
 			executions.GET("/:id", handler.GetExecution)
 			executions.GET("/:id/live-metrics", handler.GetExecutionLiveMetrics)
+			executions.GET("/:id/node-metrics", handler.GetExecutionNodeMetrics)
 			executions.PUT("/:id/baseline", handler.SetBaseline)
 			executions.DELETE("/:id", handler.DeleteExecution)
 			executions.POST("/:id/stop", handler.StopExecution)

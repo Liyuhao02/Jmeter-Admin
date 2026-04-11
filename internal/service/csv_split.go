@@ -7,6 +7,15 @@ import (
 	"path/filepath"
 )
 
+const maxCSVScanTokenSize = 8 * 1024 * 1024
+
+func newCSVScanner(file *os.File) *bufio.Scanner {
+	scanner := bufio.NewScanner(file)
+	buffer := make([]byte, 0, 64*1024)
+	scanner.Buffer(buffer, maxCSVScanTokenSize)
+	return scanner
+}
+
 // SplitCSV 将 CSV 文件均匀拆分为 partCount 份
 // filePath: 原始 CSV 文件路径
 // partCount: 分片数量
@@ -28,7 +37,7 @@ func SplitCSV(filePath string, partCount int, hasHeader bool, outputDir string, 
 
 	// 第一遍扫描：统计总行数
 	totalRows := 0
-	scanner := bufio.NewScanner(file)
+	scanner := newCSVScanner(file)
 	for scanner.Scan() {
 		totalRows++
 	}
@@ -48,7 +57,7 @@ func SplitCSV(filePath string, partCount int, hasHeader bool, outputDir string, 
 
 	// 重新打开文件进行第二遍扫描
 	file.Seek(0, 0)
-	scanner = bufio.NewScanner(file)
+	scanner = newCSVScanner(file)
 
 	// 读取表头
 	var header string

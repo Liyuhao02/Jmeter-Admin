@@ -47,7 +47,9 @@ request.interceptors.response.use(
     
     const res = response.data
     if (res.code !== 0) {
-      ElMessage.error(res.message || '请求失败')
+      if (!response.config?.silent) {
+        ElMessage.error(res.message || '请求失败')
+      }
       return Promise.reject(new Error(res.message || '请求失败'))
     }
     return res
@@ -67,21 +69,23 @@ request.interceptors.response.use(
       return Promise.reject(error)
     }
 
-    if (error.code === 'ECONNABORTED') {
-      ElMessage.error('请求超时，请检查网络')
-    } else if (!error.response) {
-      ElMessage.error('网络连接失败，请检查服务是否启动')
-    } else if (error.response.status >= 500) {
-      ElMessage.error('服务器内部错误')
-    } else if (error.response.status === 404) {
-      ElMessage.error('请求的资源不存在')
-    } else if (error.response.status === 403) {
-      ElMessage.error('没有权限执行此操作')
-    } else if (error.response.status === 401) {
-      ElMessage.error('未登录或登录已过期')
-    } else {
-      const message = error.response?.data?.message || error.message || '网络错误'
-      ElMessage.error(message)
+    if (!error.config?.silent) {
+      if (error.code === 'ECONNABORTED') {
+        ElMessage.error('请求超时，请检查网络')
+      } else if (!error.response) {
+        ElMessage.error('网络连接失败，请检查服务是否启动')
+      } else if (error.response.status >= 500) {
+        ElMessage.error('服务器内部错误')
+      } else if (error.response.status === 404) {
+        ElMessage.error('请求的资源不存在')
+      } else if (error.response.status === 403) {
+        ElMessage.error('没有权限执行此操作')
+      } else if (error.response.status === 401) {
+        ElMessage.error('未登录或登录已过期')
+      } else {
+        const message = error.response?.data?.message || error.message || '网络错误'
+        ElMessage.error(message)
+      }
     }
     return Promise.reject(error)
   }

@@ -3,10 +3,13 @@ package handler
 import (
 	"archive/zip"
 	"bufio"
+	"database/sql"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,10 +17,16 @@ import (
 	"strings"
 	"time"
 
+	"jmeter-admin/config"
+	"jmeter-admin/internal/database"
 	"jmeter-admin/internal/model"
 	"jmeter-admin/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/mem"
+	gopsnet "github.com/shirou/gopsutil/v4/net"
 )
 
 type UploadExecutionErrorDetailsRequest struct {
@@ -28,12 +37,13 @@ type UploadExecutionErrorDetailsRequest struct {
 
 // CreateExecutionRequest 创建执行请求
 type CreateExecutionRequest struct {
-	ScriptID        int64   `json:"script_id" binding:"required"`
-	SlaveIDs        []int64 `json:"slave_ids"`
-	Remarks         string  `json:"remarks"`
-	SaveHTTPDetails bool    `json:"save_http_details"`
-	IncludeMaster   bool    `json:"include_master"`
-	SplitCSV        bool    `json:"split_csv"` // 是否拆分 CSV 文件
+	ScriptID                  int64   `json:"script_id" binding:"required"`
+	SlaveIDs                  []int64 `json:"slave_ids"`
+	Remarks                   string  `json:"remarks"`
+	SaveHTTPDetails           bool    `json:"save_http_details"`
+	IncludeMaster             bool    `json:"include_master"`
+	SplitCSV                  bool    `json:"split_csv"` // 是否拆分 CSV 文件
+	IgnoreEnvironmentWarnings bool    `json:"ignore_environment_warnings"`
 }
 
 // CreateExecution 创建并启动执行
@@ -44,8 +54,20 @@ func CreateExecution(c *gin.Context) {
 		return
 	}
 
-	execution, err := service.CreateExecution(req.ScriptID, req.SlaveIDs, req.Remarks, req.SaveHTTPDetails, req.IncludeMaster, req.SplitCSV)
+	execution, err := service.CreateExecution(req.ScriptID, req.SlaveIDs, req.Remarks, req.SaveHTTPDetails, req.IncludeMaster, req.SplitCSV, req.IgnoreEnvironmentWarnings)
 	if err != nil {
+		var envErr *service.ExecutionEnvironmentValidationError
+		if errors.As(err, &envErr) {
+			c.JSON(http.StatusConflict, model.Response{
+				Code:    40901,
+				Message: envErr.Error(),
+				Data: gin.H{
+					"can_ignore":         true,
+					"environment_report": envErr.Snapshot,
+				},
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, model.Error(err.Error()))
 		return
 	}
@@ -206,6 +228,14 @@ func UploadExecutionErrorDetails(c *gin.Context) {
 
 	c.JSON(http.StatusOK, model.Success(gin.H{
 		"saved": true,
+	}))
+}
+
+// CallbackProbe 供 Slave Agent 反向探测 Master 回调可达性
+func CallbackProbe(c *gin.Context) {
+	c.JSON(http.StatusOK, model.Success(gin.H{
+		"reachable":   true,
+		"server_time": time.Now().Format("2006-01-02 15:04:05"),
 	}))
 }
 
@@ -783,4 +813,157 @@ func CompareExecutions(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, model.Success(result))
+}
+
+// collectMasterSystemStats 采集 Master 本地系统指标
+func collectMasterSystemStats() string {
+	stats := map[string]interface{}{}
+
+	// CPU
+	cpuPercent, err := cpu.Percent(500*time.Millisecond, false)
+	if err == nil && len(cpuPercent) > 0 {
+		cpuCount, _ := cpu.Counts(true)
+		stats["cpu"] = map[string]interface{}{
+			"percent": math.Round(cpuPercent[0]*100) / 100,
+			"count":   cpuCount,
+		}
+	}
+
+	// Memory
+	memInfo, err := mem.VirtualMemory()
+	if err == nil {
+		stats["memory"] = map[string]interface{}{
+			"total":   memInfo.Total / 1024 / 1024, // MB
+			"used":    memInfo.Used / 1024 / 1024,
+			"percent": math.Round(memInfo.UsedPercent*100) / 100,
+		}
+	}
+
+	// Disk
+	diskInfo, err := disk.Usage("/")
+	if err == nil {
+		stats["disk"] = map[string]interface{}{
+			"total":   diskInfo.Total / 1024 / 1024,
+			"used":    diskInfo.Used / 1024 / 1024,
+			"percent": math.Round(diskInfo.UsedPercent*100) / 100,
+		}
+	}
+
+	// Network connections
+	conns, err := gopsnet.Connections("tcp")
+	if err == nil {
+		stats["network"] = map[string]interface{}{
+			"connections": len(conns),
+		}
+	}
+
+	jsonBytes, _ := json.Marshal(stats)
+	return string(jsonBytes)
+}
+
+// GetExecutionNodeMetrics 获取执行节点的实时系统指标
+func GetExecutionNodeMetrics(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error("无效的执行ID"))
+		return
+	}
+
+	// 1. 获取执行记录
+	var slaveIDsJSON sql.NullString
+	var status string
+	err = database.DB.QueryRow(
+		"SELECT status, slave_ids FROM executions WHERE id = ?",
+		id,
+	).Scan(&status, &slaveIDsJSON)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, model.Error("执行记录不存在"))
+		} else {
+			c.JSON(http.StatusInternalServerError, model.Error("查询执行记录失败: "+err.Error()))
+		}
+		return
+	}
+
+	// 如果执行未在运行中，返回空数组
+	if status != "running" {
+		c.JSON(http.StatusOK, model.Success(gin.H{"nodes": []interface{}{}}))
+		return
+	}
+
+	// 2. 解析 slave_ids
+	var slaveIDs []int64
+	if slaveIDsJSON.Valid && slaveIDsJSON.String != "" {
+		if err := json.Unmarshal([]byte(slaveIDsJSON.String), &slaveIDs); err != nil {
+			// 解析失败，继续执行，slaveIDs 保持为空
+			slaveIDs = []int64{}
+		}
+	}
+
+	// 3. 查询 Slave 信息并获取 Agent 健康数据
+	nodes := []gin.H{}
+
+	// 添加 Master 节点
+	masterStats := collectMasterSystemStats()
+	masterHost := config.GlobalConfig.JMeter.MasterHostname
+	if masterHost == "" {
+		masterHost = "localhost"
+	}
+	nodes = append(nodes, gin.H{
+		"id":           0,
+		"name":         "Master",
+		"host":         masterHost,
+		"role":         "master",
+		"online":       true,
+		"system_stats": masterStats,
+	})
+
+	for _, sid := range slaveIDs {
+		// 查询 slave 信息
+		var slave model.Slave
+		var lastCheckTime sql.NullString
+		var agentCheckTime sql.NullString
+		var systemStats sql.NullString
+		var agentStatus sql.NullString
+		err := database.DB.QueryRow(
+			"SELECT id, name, host, port, status, agent_status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, agent_uptime, created_at FROM slaves WHERE id = ?",
+			sid,
+		).Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &agentStatus, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &slave.AgentUptime, &slave.CreatedAt)
+
+		if err != nil {
+			// Slave 不存在，跳过
+			continue
+		}
+
+		if lastCheckTime.Valid {
+			slave.LastCheckTime = lastCheckTime.String
+		}
+		if agentCheckTime.Valid {
+			slave.AgentCheckTime = agentCheckTime.String
+		}
+		if systemStats.Valid {
+			slave.SystemStats = systemStats.String
+		}
+		if agentStatus.Valid {
+			slave.AgentStatus = agentStatus.String
+		} else {
+			slave.AgentStatus = "unknown"
+		}
+
+		// 调用 CheckSlaveAgent 获取系统指标
+		result, _ := service.CheckSlaveAgent(&slave)
+
+		// 组装节点数据
+		nodes = append(nodes, gin.H{
+			"id":           slave.ID,
+			"name":         slave.Name,
+			"host":         slave.Host,
+			"role":         "slave",
+			"online":       result.Online,
+			"system_stats": result.SystemStats,
+		})
+	}
+
+	c.JSON(http.StatusOK, model.Success(gin.H{"nodes": nodes}))
 }

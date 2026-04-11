@@ -165,11 +165,11 @@
         <el-table-column label="状态" width="90" align="center">
           <template #default="{ row }">
             <el-tag
-              :type="getStatusType(row.status)"
+              :type="getStatusType(row)"
               size="small"
               class="status-tag"
             >
-              {{ getStatusText(row.status) }}
+              {{ getStatusText(row) }}
             </el-tag>
           </template>
         </el-table-column>
@@ -212,11 +212,11 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="TPS" width="100" align="right" header-align="right" sortable :sort-method="(a, b) => getThroughput(a) - getThroughput(b)">
+        <el-table-column label="TPS / 请求率" width="120" align="right" header-align="right" sortable :sort-method="(a, b) => getThroughput(a) - getThroughput(b)">
           <template #default="{ row }">
             <div class="metric-with-unit">
               <span class="metric-value metric-blue">{{ formatNumber(getThroughput(row)) }}</span>
-              <span class="unit">req/s</span>
+              <span class="unit">{{ getThroughputUnit(row) }}</span>
             </div>
           </template>
         </el-table-column>
@@ -413,6 +413,8 @@ const refreshTimer = ref(null)
 const clockTimer = ref(null)
 const nowTick = ref(Date.now())
 const liveMetricsMap = ref({})
+const listRequestInFlight = ref(false)
+let liveMetricsHydrationToken = 0
 const LIST_REFRESH_INTERVAL = 3000
 
 // el-table ref
@@ -512,24 +514,34 @@ const formatMetricValue = (value, unit) => {
 
 // 获取状态类型
 const getStatusType = (status) => {
+  const normalized = typeof status === 'object' ? (status?.status_tone || status?.status || 'info') : status
   const map = {
     running: 'primary',
     success: 'success',
     failed: 'danger',
-    stopped: 'info'
+    stopped: 'info',
+    info: 'primary',
+    warning: 'warning',
+    danger: 'danger'
   }
-  return map[status] || 'info'
+  return map[normalized] || 'info'
 }
 
 // 获取状态显示文本
 const getStatusText = (status) => {
+  const normalized = typeof status === 'object' ? (status?.display_status || status?.status) : status
   const textMap = {
     running: '运行中',
     success: '已完成',
+    completed_success: '完成(全部成功)',
+    completed_with_errors: '完成(部分失败)',
+    completed_all_failed: '完成(全部失败)',
+    completed_no_samples: '完成(无有效样本)',
+    process_failed: '执行失败',
     failed: '失败',
     stopped: '已停止'
   }
-  return textMap[status] || status
+  return textMap[normalized] || normalized
 }
 
 // 格式化日期时间
@@ -628,19 +640,31 @@ const getResponseTime = (row) => {
 
 const getThroughput = (row) => {
   if (row?.status === 'running') {
-    const liveValue = liveMetricsMap.value[row.id]?.current_tps
+    const live = liveMetricsMap.value[row.id] || {}
+    const liveValue = live.current_primary_throughput ?? (live.has_transaction_samples ? live.current_tps : live.current_request_rate)
     if (liveValue !== null && liveValue !== undefined) {
       const liveNum = parseFloat(liveValue)
       if (!isNaN(liveNum)) return liveNum
     }
   }
-  const value = getSummaryField(row, 'throughput')
+  const hasTransactionSamples = Number(getSummaryField(row, 'transaction_samples') || 0) > 0
+  const field = hasTransactionSamples ? 'transaction_tps' : 'request_rate'
+  const value = getSummaryField(row, field) ?? getSummaryField(row, 'primary_throughput') ?? getSummaryField(row, 'throughput')
   if (value === null || value === undefined || value === '') return null
   const num = parseFloat(value)
   return isNaN(num) ? null : num
 }
 
+const getThroughputUnit = (row) => {
+  if (row?.status === 'running') {
+    const live = liveMetricsMap.value[row.id] || {}
+    return live.primary_throughput_unit || (live.has_transaction_samples ? 'tps' : 'req/s')
+  }
+  return getSummaryField(row, 'primary_throughput_unit') || (Number(getSummaryField(row, 'transaction_samples') || 0) > 0 ? 'tps' : 'req/s')
+}
+
 const hydrateRunningMetrics = async (rows) => {
+  const token = ++liveMetricsHydrationToken
   const runningRows = rows.filter(item => item.status === 'running')
   if (!runningRows.length) {
     liveMetricsMap.value = {}
@@ -659,7 +683,9 @@ const hydrateRunningMetrics = async (rows) => {
     }
   })
 
-  liveMetricsMap.value = nextMap
+  if (token === liveMetricsHydrationToken) {
+    liveMetricsMap.value = nextMap
+  }
 }
 
 // 获取执行统计
@@ -701,8 +727,15 @@ const syncFiltersToURL = () => {
 }
 
 // 获取执行列表
-const fetchExecutions = async () => {
-  tableLoading.value = true
+const fetchExecutions = async ({ background = false } = {}) => {
+  if (listRequestInFlight.value) {
+    return
+  }
+
+  listRequestInFlight.value = true
+  if (!background) {
+    tableLoading.value = true
+  }
   try {
     const params = {
       page: pagination.value.page,
@@ -726,7 +759,7 @@ const fetchExecutions = async () => {
     const res = await executionApi.getList(params)
     executionList.value = res.data?.list || []
     pagination.value.total = res.data?.total || 0
-    await hydrateRunningMetrics(executionList.value)
+    void hydrateRunningMetrics(executionList.value)
 
     // 恢复选中状态
     if (selectedIds.value.size > 0) {
@@ -743,7 +776,10 @@ const fetchExecutions = async () => {
   } catch (error) {
     console.error('获取执行列表失败:', error)
   } finally {
-    tableLoading.value = false
+    listRequestInFlight.value = false
+    if (!background) {
+      tableLoading.value = false
+    }
   }
 }
 
@@ -856,7 +892,7 @@ const setupAutoRefresh = () => {
   }
   refreshTimer.value = setInterval(() => {
     if (hasRunning.value) {
-      fetchExecutions()
+      fetchExecutions({ background: true })
     }
   }, LIST_REFRESH_INTERVAL)
 }

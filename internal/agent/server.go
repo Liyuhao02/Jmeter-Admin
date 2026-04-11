@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,7 +11,9 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -87,16 +92,18 @@ func collectSystemStats() *SystemStats {
 }
 
 type Server struct {
-	dataDir string
-	token   string
-	mux     *http.ServeMux
+	dataDir    string
+	token      string
+	jmeterPath string
+	mux        *http.ServeMux
 }
 
-func NewServer(dataDir, token string) *Server {
+func NewServer(dataDir, token, jmeterPath string) *Server {
 	s := &Server{
-		dataDir: dataDir,
-		token:   token,
-		mux:     http.NewServeMux(),
+		dataDir:    dataDir,
+		token:      token,
+		jmeterPath: strings.TrimSpace(jmeterPath),
+		mux:        http.NewServeMux(),
 	}
 	s.setupRoutes()
 	return s
@@ -106,6 +113,8 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/api/files/upload", s.authMiddleware(s.handleUpload))
 	s.mux.HandleFunc("/api/files/", s.authMiddleware(s.handleFileOperations))
+	s.mux.HandleFunc("/api/network/check-callback", s.authMiddleware(s.handleCheckCallback))
+	s.mux.HandleFunc("/api/environment/report", s.authMiddleware(s.handleEnvironmentReport))
 }
 
 func (s *Server) Start(addr string) error {
@@ -139,6 +148,287 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"sys_stats":      collectSystemStats(),
 	}
 	s.writeJSON(w, http.StatusOK, response)
+}
+
+type callbackCheckRequest struct {
+	URL string `json:"url"`
+}
+
+type callbackCheckResponse struct {
+	Reachable  bool   `json:"reachable"`
+	StatusCode int    `json:"status_code"`
+	LatencyMS  int64  `json:"latency_ms"`
+	Error      string `json:"error,omitempty"`
+}
+
+type environmentReport struct {
+	AgentVersion          string   `json:"agent_version"`
+	JMeterPath            string   `json:"jmeter_path"`
+	JMeterHome            string   `json:"jmeter_home"`
+	JMeterVersion         string   `json:"jmeter_version"`
+	JMeterVersionRaw      string   `json:"jmeter_version_raw"`
+	PluginJars            []string `json:"plugin_jars"`
+	PluginFingerprint     string   `json:"plugin_fingerprint"`
+	PropertiesLines       []string `json:"properties_lines"`
+	PropertiesFingerprint string   `json:"properties_fingerprint"`
+	Warnings              []string `json:"warnings,omitempty"`
+}
+
+func (s *Server) handleCheckCallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	var req callbackCheckRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+
+	targetURL := strings.TrimSpace(req.URL)
+	if targetURL == "" {
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing callback url"})
+		return
+	}
+
+	start := time.Now()
+	client := &http.Client{Timeout: 5 * time.Second}
+	httpReq, err := http.NewRequest(http.MethodGet, targetURL, nil)
+	if err != nil {
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid callback url"})
+		return
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		s.writeJSON(w, http.StatusOK, callbackCheckResponse{
+			Reachable: false,
+			LatencyMS: time.Since(start).Milliseconds(),
+			Error:     err.Error(),
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	s.writeJSON(w, http.StatusOK, callbackCheckResponse{
+		Reachable:  resp.StatusCode >= 200 && resp.StatusCode < 300,
+		StatusCode: resp.StatusCode,
+		LatencyMS:  time.Since(start).Milliseconds(),
+	})
+}
+
+func fingerprintStrings(values []string) string {
+	hash := sha256.Sum256([]byte(strings.Join(values, "\n")))
+	return hex.EncodeToString(hash[:])
+}
+
+func normalizePropertiesContent(data []byte) string {
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	normalized := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
+			continue
+		}
+
+		separator := strings.IndexAny(line, "=:")
+		if separator == -1 {
+			normalized = append(normalized, line)
+			continue
+		}
+
+		key := strings.TrimSpace(line[:separator])
+		value := strings.TrimSpace(line[separator+1:])
+		normalized = append(normalized, key+"="+value)
+	}
+
+	sort.Strings(normalized)
+	return strings.Join(normalized, "\n")
+}
+
+func collectFileFingerprint(paths []string) string {
+	parts := make([]string, 0, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			parts = append(parts, path+"|missing")
+			continue
+		}
+		content := data
+		if strings.HasSuffix(path, ".properties") {
+			content = []byte(normalizePropertiesContent(data))
+		}
+		sum := sha256.Sum256(content)
+		parts = append(parts, path+"|"+hex.EncodeToString(sum[:]))
+	}
+	return fingerprintStrings(parts)
+}
+
+func collectNormalizedPropertiesLines(paths []string) []string {
+	lines := make([]string, 0)
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		prefix := filepath.Base(path)
+		if err != nil {
+			lines = append(lines, prefix+":__missing__")
+			continue
+		}
+		normalized := normalizePropertiesContent(data)
+		if normalized == "" {
+			lines = append(lines, prefix+":__empty__")
+			continue
+		}
+		for _, line := range strings.Split(normalized, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			lines = append(lines, prefix+":"+line)
+		}
+	}
+	sort.Strings(lines)
+	return lines
+}
+
+func (s *Server) resolveJMeterExecutable() (string, error) {
+	path := s.jmeterPath
+	if path == "" {
+		if envPath := strings.TrimSpace(os.Getenv("JMETER_PATH")); envPath != "" {
+			path = envPath
+		} else {
+			path = "jmeter"
+		}
+	}
+	return exec.LookPath(path)
+}
+
+func parseJMeterVersion(output string) string {
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		for _, field := range strings.Fields(line) {
+			if strings.Count(field, ".") >= 1 && strings.ContainsAny(field, "0123456789") {
+				return strings.Trim(field, " ,")
+			}
+		}
+	}
+	return ""
+}
+
+func buildJMeterVersionCandidates(executable string) []string {
+	candidates := []string{executable}
+	base := filepath.Base(executable)
+	if strings.Contains(base, "jmeter-server") {
+		fallback := filepath.Join(filepath.Dir(executable), strings.Replace(base, "jmeter-server", "jmeter", 1))
+		if fallback != executable {
+			candidates = append(candidates, fallback)
+		}
+	}
+	return dedupeStrings(candidates)
+}
+
+func dedupeStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func detectJMeterVersion(executable string) (string, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rawOutputs := make([]string, 0, 2)
+	for _, candidate := range buildJMeterVersionCandidates(executable) {
+		for _, arg := range []string{"--version", "-v"} {
+			cmd := exec.CommandContext(ctx, candidate, arg)
+			output, err := cmd.CombinedOutput()
+			raw := strings.TrimSpace(string(output))
+			if raw != "" {
+				rawOutputs = append(rawOutputs, candidate+" "+arg+":\n"+raw)
+			}
+			if err != nil && raw == "" {
+				continue
+			}
+			if version := parseJMeterVersion(raw); version != "" {
+				return version, strings.Join(rawOutputs, "\n\n"), nil
+			}
+		}
+	}
+
+	return "", strings.Join(rawOutputs, "\n\n"), nil
+}
+
+func collectEnvironmentReport(jmeterPath string) environmentReport {
+	report := environmentReport{
+		AgentVersion: version,
+		JMeterPath:   strings.TrimSpace(jmeterPath),
+		PluginJars:   []string{},
+		Warnings:     []string{},
+	}
+
+	executable, err := func() (string, error) {
+		if strings.TrimSpace(jmeterPath) != "" {
+			return exec.LookPath(jmeterPath)
+		}
+		if envPath := strings.TrimSpace(os.Getenv("JMETER_PATH")); envPath != "" {
+			return exec.LookPath(envPath)
+		}
+		return exec.LookPath("jmeter")
+	}()
+	if err != nil {
+		report.Warnings = append(report.Warnings, "未找到 JMeter 可执行文件")
+		return report
+	}
+
+	report.JMeterPath = executable
+	report.JMeterHome = filepath.Dir(filepath.Dir(executable))
+
+	versionText, rawVersion, versionErr := detectJMeterVersion(executable)
+	report.JMeterVersion = versionText
+	report.JMeterVersionRaw = rawVersion
+	if versionErr != nil {
+		report.Warnings = append(report.Warnings, "读取 JMeter 版本失败: "+versionErr.Error())
+	}
+
+	pluginFiles, _ := filepath.Glob(filepath.Join(report.JMeterHome, "lib", "ext", "*.jar"))
+	sort.Strings(pluginFiles)
+	pluginNames := make([]string, 0, len(pluginFiles))
+	for _, path := range pluginFiles {
+		pluginNames = append(pluginNames, filepath.Base(path))
+	}
+	report.PluginJars = pluginNames
+	report.PluginFingerprint = fingerprintStrings(pluginNames)
+
+	props := []string{
+		filepath.Join(report.JMeterHome, "bin", "jmeter.properties"),
+		filepath.Join(report.JMeterHome, "bin", "user.properties"),
+	}
+	report.PropertiesLines = collectNormalizedPropertiesLines(props)
+	report.PropertiesFingerprint = collectFileFingerprint(props)
+	return report
+}
+
+func (s *Server) handleEnvironmentReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, collectEnvironmentReport(s.jmeterPath))
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {

@@ -25,6 +25,11 @@ export const scriptApi = {
     return request.get(`/api/scripts/${id}`)
   },
 
+  // 获取脚本依赖分析
+  getDependencies(id, params) {
+    return request.get(`/api/scripts/${id}/dependencies`, { params })
+  },
+
   // 更新脚本
   update(id, data) {
     return request.put(`/api/scripts/${id}`, data)

@@ -151,6 +151,26 @@ func GetScript(c *gin.Context) {
 	}))
 }
 
+// GetScriptDependencies GET /api/scripts/:id/dependencies
+func GetScriptDependencies(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error("无效的脚本ID"))
+		return
+	}
+
+	distributed := strings.EqualFold(c.DefaultQuery("distributed", "false"), "true")
+	splitCSV := strings.EqualFold(c.DefaultQuery("split_csv", "false"), "true")
+
+	report, err := service.InspectScriptDependencies(id, distributed, splitCSV)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error(err.Error()))
+		return
+	}
+
+	c.JSON(http.StatusOK, model.Success(report))
+}
+
 // UpdateScript PUT /api/scripts/:id (JSON: name, description)
 func UpdateScript(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)

@@ -30,3 +30,12 @@ type ScriptVersion struct {
 	ChangeSummary string `json:"change_summary"`
 	CreatedAt     string `json:"created_at"`
 }
+
+type ScriptDependencyReport struct {
+	CSVFiles            []string `json:"csv_files"`
+	FileDependencies    []string `json:"file_dependencies"`
+	PluginDependencies  []string `json:"plugin_dependencies"`
+	AttachedFiles       []string `json:"attached_files"`
+	MissingDependencies []string `json:"missing_dependencies"`
+	Warnings            []string `json:"warnings"`
+}

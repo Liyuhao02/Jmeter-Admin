@@ -318,6 +318,28 @@
       class="diff-dialog"
     >
       <div class="diff-dialog-body">
+        <div v-if="saveRiskReport.summary.length || saveRiskReport.blockingIssues.length || saveRiskReport.warnings.length" class="save-risk-panel">
+          <div class="save-risk-header">
+            <span class="save-risk-title">保存前风险检查</span>
+            <div class="save-risk-chips" v-if="saveRiskReport.summary.length">
+              <span v-for="item in saveRiskReport.summary" :key="item.label" class="save-risk-chip">
+                {{ item.label }} {{ item.count }}
+              </span>
+            </div>
+          </div>
+          <div v-if="saveRiskReport.blockingIssues.length" class="save-risk-list is-blocking">
+            <div v-for="item in saveRiskReport.blockingIssues" :key="item.title" class="save-risk-item">
+              <strong>{{ item.title }}</strong>
+              <span>{{ item.detail }}</span>
+            </div>
+          </div>
+          <div v-if="saveRiskReport.warnings.length" class="save-risk-list is-warning">
+            <div v-for="item in saveRiskReport.warnings" :key="item.title" class="save-risk-item">
+              <strong>{{ item.title }}</strong>
+              <span>{{ item.detail }}</span>
+            </div>
+          </div>
+        </div>
         <div class="diff-summary">
           <div class="diff-stat">
             <span class="diff-stat-label">原始行数</span>
@@ -371,6 +393,7 @@ import {
 import { scriptApi } from '@/api/script'
 import JmxTreeEditor from '@/components/JmxTreeEditor.vue'
 import { extractCSVDataSetFilesFromXML, parseJMX } from '@/utils/jmxParser.js'
+import { analyzeJmxSaveRisks } from '@/utils/jmxRisk'
 import { formatDateTimeInShanghai } from '@/utils/datetime'
 
 // Monaco Editor 动态导入
@@ -428,6 +451,11 @@ const pendingFiles = ref([])
 const uploadRef = ref(null)
 const targetUploadFilename = ref('')
 const savePreviewVisible = ref(false)
+const saveRiskReport = ref({
+  summary: [],
+  blockingIssues: [],
+  warnings: []
+})
 
 // 版本管理相关状态
 const versionDrawerVisible = ref(false)
@@ -791,6 +819,7 @@ const openSavePreview = async () => {
   }
 
   previewContent.value = contentToSave
+  saveRiskReport.value = analyzeJmxSaveRisks(contentToSave, fileList.value)
   savePreviewVisible.value = true
 }
 
@@ -1696,6 +1725,80 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.save-risk-panel {
+  padding: 16px;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.03);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.save-risk-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.save-risk-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.save-risk-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.save-risk-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(0, 153, 255, 0.12);
+  color: var(--accent-blue);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.save-risk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.save-risk-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+}
+
+.save-risk-item strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.save-risk-item span {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.save-risk-list.is-blocking .save-risk-item {
+  border: 1px solid rgba(255, 92, 92, 0.35);
+  background: rgba(255, 92, 92, 0.08);
+}
+
+.save-risk-list.is-warning .save-risk-item {
+  border: 1px solid rgba(255, 184, 0, 0.24);
+  background: rgba(255, 184, 0, 0.06);
 }
 
 .diff-summary {

@@ -135,6 +135,27 @@ func GetScript(id int64) (*model.Script, error) {
 	return &script, nil
 }
 
+// InspectScriptDependencies 检查脚本依赖与分布式执行风险
+func InspectScriptDependencies(id int64, distributed bool, splitCSV bool) (*model.ScriptDependencyReport, error) {
+	script, err := GetScript(id)
+	if err != nil {
+		return nil, err
+	}
+
+	attachedFiles := getAttachedScriptFileNames(id)
+	scan := inspectJMXDependencies(script.FilePath, attachedFiles, distributed, splitCSV)
+
+	report := &model.ScriptDependencyReport{
+		CSVFiles:            scan.CSVFiles,
+		FileDependencies:    scan.FileDependencies,
+		PluginDependencies:  scan.PluginDependencies,
+		AttachedFiles:       scan.AttachedFiles,
+		MissingDependencies: scan.MissingDependencies,
+		Warnings:            scan.Warnings,
+	}
+	return report, nil
+}
+
 // GetScriptDownloadInfo 获取脚本主文件下载信息
 func GetScriptDownloadInfo(id int64) (string, string, error) {
 	script, err := GetScript(id)

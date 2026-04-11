@@ -145,6 +145,19 @@
         <div v-if="splitCSV && executionMode === 'distributed'" class="detail-notice compact">
           执行前将自动拆分脚本中引用的 CSV 文件，并通过 Agent 分发到各 Slave 节点。请确保所有 Slave 的 Agent 服务已启动。
         </div>
+        <div v-if="dependencyLoading" class="detail-notice compact">
+          正在分析脚本依赖...
+        </div>
+        <div v-else-if="dependencySummaryItems.length || dependencyWarnings.length" class="dependency-summary">
+          <div v-if="dependencySummaryItems.length" class="dependency-chip-row">
+            <span v-for="item in dependencySummaryItems" :key="item.label" class="dependency-chip">
+              {{ item.label }} {{ item.count }}
+            </span>
+          </div>
+          <div v-for="warning in dependencyWarnings" :key="warning" class="detail-notice compact warning">
+            {{ warning }}
+          </div>
+        </div>
       </div>
 
       <!-- Slave节点选择（分布式模式展开） -->
@@ -283,6 +296,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, Warning, VideoPlay, InfoFilled, CircleCheckFilled, WarningFilled } from '@element-plus/icons-vue'
 import { slaveApi } from '@/api/slave'
 import { executionApi } from '@/api/execution'
+import { scriptApi } from '@/api/script'
 
 const props = defineProps({
   visible: {
@@ -315,6 +329,8 @@ const includeMaster = ref(false)
 const splitCSV = ref(false)
 const masterHostname = ref('')
 const networkInterfaces = ref([])
+const dependencyLoading = ref(false)
+const dependencyReport = ref(null)
 
 // 计算属性
 const onlineSlaves = computed(() => {
@@ -329,11 +345,86 @@ const canExecute = computed(() => {
   return selectedSlaves.value.length > 0
 })
 
+const dependencySummaryItems = computed(() => {
+  const report = dependencyReport.value
+  if (!report) return []
+  const items = []
+  if (report.csv_files?.length) items.push({ label: 'CSV', count: report.csv_files.length })
+  if (report.file_dependencies?.length) items.push({ label: '本地文件', count: report.file_dependencies.length })
+  if (report.plugin_dependencies?.length) items.push({ label: '插件组件', count: report.plugin_dependencies.length })
+  if (report.missing_dependencies?.length) items.push({ label: '缺失依赖', count: report.missing_dependencies.length })
+  return items
+})
+
+const dependencyWarnings = computed(() => dependencyReport.value?.warnings || [])
+
+const escapeHtml = (value) => {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+const trimList = (items = [], limit = 8) => {
+  if (!Array.isArray(items)) return []
+  if (items.length <= limit) return items
+  return [...items.slice(0, limit), `... 另有 ${items.length - limit} 项`]
+}
+
+const renderEnvironmentDifferenceHtml = (report) => {
+  const baselineNode = report?.baseline?.node || '基线节点'
+  const warnings = Array.isArray(report?.warnings) ? report.warnings : []
+  const differences = Array.isArray(report?.differences) ? report.differences : []
+
+  const warningHtml = warnings.length
+    ? `<div class="env-confirm-block"><div class="env-confirm-title">检测到的差异</div><ul>${warnings.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></div>`
+    : ''
+
+  const differenceHtml = differences.length
+    ? `<div class="env-confirm-block"><div class="env-confirm-title">差异明细（基线：${escapeHtml(baselineNode)}）</div>${differences.map((diff) => {
+      const values = []
+      if (diff.baseline) {
+        values.push(`<div><strong>基线：</strong>${escapeHtml(diff.baseline)}</div>`)
+      }
+      if (diff.current) {
+        values.push(`<div><strong>当前：</strong>${escapeHtml(diff.current)}</div>`)
+      }
+      if (diff.added?.length) {
+        values.push(`<div><strong>当前多出：</strong><code>${trimList(diff.added).map(escapeHtml).join('</code><br/><code>')}</code></div>`)
+      }
+      if (diff.missing?.length) {
+        values.push(`<div><strong>相对基线缺少：</strong><code>${trimList(diff.missing).map(escapeHtml).join('</code><br/><code>')}</code></div>`)
+      }
+      return `<div class="env-diff-item">
+        <div class="env-diff-summary">${escapeHtml(diff.summary || diff.category || '环境差异')}</div>
+        <div class="env-diff-node">${escapeHtml(diff.node || '')}</div>
+        <div class="env-diff-values">${values.join('')}</div>
+      </div>`
+    }).join('')}</div>`
+    : ''
+
+  return `
+    <div class="env-confirm">
+      <p>分布式执行前发现环境差异，这些差异不一定会导致执行失败，但可能影响结果一致性。</p>
+      ${warningHtml}
+      ${differenceHtml}
+      <p class="env-confirm-foot">如果你确认这些差异可接受，可以选择“忽略并继续执行”。</p>
+    </div>
+  `
+}
+
 // 监听visible变化，关闭时重置状态
 watch(() => props.visible, (val) => {
   if (!val) {
     resetForm()
   }
+})
+
+watch([executionMode, splitCSV, () => props.scriptId, () => props.visible], ([, , scriptId, visible]) => {
+  if (!visible || !scriptId) return
+  loadScriptDependencies()
 })
 
 // 获取状态类型
@@ -366,12 +457,31 @@ const resetForm = () => {
   splitCSV.value = false
   masterHostname.value = ''
   networkInterfaces.value = []
+  dependencyReport.value = null
 }
 
 // 弹窗打开时加载slave列表和Master配置
 const handleOpen = () => {
   loadSlaves()
   loadMasterConfig()
+  loadScriptDependencies()
+}
+
+const loadScriptDependencies = async () => {
+  if (!props.scriptId) return
+  dependencyLoading.value = true
+  try {
+    const res = await scriptApi.getDependencies(props.scriptId, {
+      distributed: executionMode.value === 'distributed',
+      split_csv: executionMode.value === 'distributed' ? splitCSV.value : false
+    })
+    dependencyReport.value = res.data || null
+  } catch (error) {
+    console.error('分析脚本依赖失败:', error)
+    dependencyReport.value = null
+  } finally {
+    dependencyLoading.value = false
+  }
 }
 
 // 加载Slave列表
@@ -442,6 +552,19 @@ const handleCancel = () => {
 }
 
 // 执行
+const submitExecution = async (ignoreEnvironmentWarnings = false) => {
+  const data = {
+    script_id: props.scriptId,
+    slave_ids: executionMode.value === 'distributed' ? selectedSlaves.value : [],
+    remarks: remarks.value,
+    save_http_details: saveHTTPDetails.value,
+    include_master: executionMode.value === 'distributed' ? includeMaster.value : false,
+    split_csv: executionMode.value === 'distributed' ? splitCSV.value : false,
+    ignore_environment_warnings: ignoreEnvironmentWarnings
+  }
+  return executionApi.create(data)
+}
+
 const handleExecute = async () => {
   if (executionMode.value === 'distributed' && selectedSlaves.value.length === 0) {
     ElMessage.warning('请至少选择一个Slave节点')
@@ -489,15 +612,35 @@ const handleExecute = async () => {
       }
     }
 
-    const data = {
-      script_id: props.scriptId,
-      slave_ids: executionMode.value === 'distributed' ? selectedSlaves.value : [],
-      remarks: remarks.value,
-      save_http_details: saveHTTPDetails.value,
-      include_master: executionMode.value === 'distributed' ? includeMaster.value : false,
-      split_csv: executionMode.value === 'distributed' ? splitCSV.value : false
+    let res
+    try {
+      res = await submitExecution(false)
+    } catch (error) {
+      const resp = error?.response
+      const envReport = resp?.data?.data?.environment_report
+      const canIgnore = resp?.status === 409 && resp?.data?.code === 40901 && resp?.data?.data?.can_ignore
+      if (!canIgnore || !envReport) {
+        throw error
+      }
+
+      try {
+        await ElMessageBox.confirm(
+          renderEnvironmentDifferenceHtml(envReport),
+          '环境一致性存在差异',
+          {
+            confirmButtonText: '忽略并继续执行',
+            cancelButtonText: '取消',
+            type: 'warning',
+            dangerouslyUseHTMLString: true,
+            customClass: 'environment-confirm-dialog'
+          }
+        )
+      } catch {
+        return
+      }
+
+      res = await submitExecution(true)
     }
-    const res = await executionApi.create(data)
     const newExecutionId = res.data?.id
     
     ElMessage.success('执行已启动')
@@ -705,6 +848,80 @@ const handleExecute = async () => {
   gap: 12px;
 }
 
+:deep(.environment-confirm-dialog) {
+  .el-message-box__message {
+    max-height: 60vh;
+    overflow: auto;
+  }
+}
+
+:deep(.env-confirm) {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+
+:deep(.env-confirm-block) {
+  margin-top: 12px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+}
+
+:deep(.env-confirm-title) {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+:deep(.env-confirm ul) {
+  margin: 0;
+  padding-left: 18px;
+}
+
+:deep(.env-diff-item) {
+  padding: 10px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+:deep(.env-diff-item:first-child) {
+  border-top: none;
+  padding-top: 0;
+}
+
+:deep(.env-diff-summary) {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+:deep(.env-diff-node) {
+  font-size: 12px;
+  color: var(--accent-blue);
+}
+
+:deep(.env-diff-values) {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+:deep(.env-diff-values code) {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+}
+
+:deep(.env-confirm-foot) {
+  margin-top: 12px;
+  color: #f7c46c;
+}
+
 .mode-card {
   position: relative;
   display: flex;
@@ -904,6 +1121,35 @@ const handleExecute = async () => {
   .el-icon {
     font-size: 16px;
   }
+}
+
+.dependency-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.dependency-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dependency-chip {
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.18);
+  color: var(--accent-blue);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.detail-notice.warning {
+  color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.2);
+  background: rgba(245, 158, 11, 0.08);
 }
 
 // 底部区域
