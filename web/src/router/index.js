@@ -1,10 +1,11 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import MainLayout from '@/layout/MainLayout.vue'
-import ScriptList from '@/views/ScriptList.vue'
-import ScriptEdit from '@/views/ScriptEdit.vue'
-import SlaveManage from '@/views/SlaveManage.vue'
-import ExecutionList from '@/views/ExecutionList.vue'
-import ExecutionDetail from '@/views/ExecutionDetail.vue'
+
+const ScriptList = () => import('@/views/ScriptList.vue')
+const ScriptEdit = () => import('@/views/ScriptEdit.vue')
+const SlaveManage = () => import('@/views/SlaveManage.vue')
+const ExecutionList = () => import('@/views/ExecutionList.vue')
+const ExecutionDetail = () => import('@/views/ExecutionDetail.vue')
 
 const routes = [
   {

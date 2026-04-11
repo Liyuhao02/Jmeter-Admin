@@ -32,8 +32,20 @@ export default defineConfig({
     assetsDir: 'assets',
     rollupOptions: {
       output: {
-        manualChunks: {
-          'monaco-editor': ['monaco-editor']
+        manualChunks(id) {
+          if (!id.includes('node_modules')) {
+            return
+          }
+          if (id.includes('monaco-editor')) {
+            return 'monaco-editor'
+          }
+          if (id.includes('element-plus') || id.includes('@element-plus')) {
+            return 'element-plus'
+          }
+          if (id.includes('vue-router') || id.includes('/vue/')) {
+            return 'vue-vendor'
+          }
+          return 'vendor'
         }
       }
     }

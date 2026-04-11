@@ -39,3 +39,8 @@ type ScriptDependencyReport struct {
 	MissingDependencies []string `json:"missing_dependencies"`
 	Warnings            []string `json:"warnings"`
 }
+
+type ScriptStats struct {
+	TotalScripts int64 `json:"total_scripts"`
+	TotalFiles   int64 `json:"total_files"`
+}

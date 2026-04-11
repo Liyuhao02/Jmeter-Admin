@@ -49,6 +49,16 @@ func ListScripts(c *gin.Context) {
 	c.JSON(http.StatusOK, model.PageSuccess(total, scripts))
 }
 
+func GetScriptStats(c *gin.Context) {
+	stats, err := service.GetScriptStats()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error(err.Error()))
+		return
+	}
+
+	c.JSON(http.StatusOK, model.Success(stats))
+}
+
 // CreateScript POST /api/scripts (form-data: name, description, file)
 func CreateScript(c *gin.Context) {
 	name := c.PostForm("name")

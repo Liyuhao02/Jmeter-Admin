@@ -271,6 +271,54 @@ func TestMergeJTLFiles(t *testing.T) {
 	}
 }
 
+func TestGetScriptStats(t *testing.T) {
+	dir := t.TempDir()
+	config.GlobalConfig.Dirs.Data = filepath.Join(dir, "data")
+	config.GlobalConfig.Dirs.Results = filepath.Join(dir, "results")
+	if err := os.MkdirAll(config.GlobalConfig.Dirs.Data, 0755); err != nil {
+		t.Fatalf("create data dir: %v", err)
+	}
+	if err := os.MkdirAll(config.GlobalConfig.Dirs.Results, 0755); err != nil {
+		t.Fatalf("create results dir: %v", err)
+	}
+
+	if database.DB != nil {
+		_ = database.CloseDB()
+	}
+	if err := database.InitDB(); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	defer func() {
+		_ = database.CloseDB()
+	}()
+
+	now := "2026-04-11 10:00:00"
+	if _, err := database.DB.Exec(
+		"INSERT INTO scripts (id, name, description, file_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)",
+		1, "demo-a", "", filepath.Join(dir, "a.jmx"), now, now,
+		2, "demo-b", "", filepath.Join(dir, "b.jmx"), now, now,
+	); err != nil {
+		t.Fatalf("insert scripts: %v", err)
+	}
+
+	if _, err := database.DB.Exec(
+		"INSERT INTO script_files (script_id, file_name, file_path, file_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)",
+		1, "a.jmx", filepath.Join(dir, "a.jmx"), "jmx", now, now,
+		1, "a.csv", filepath.Join(dir, "a.csv"), "csv", now, now,
+		2, "b.jmx", filepath.Join(dir, "b.jmx"), "jmx", now, now,
+	); err != nil {
+		t.Fatalf("insert script files: %v", err)
+	}
+
+	stats, err := GetScriptStats()
+	if err != nil {
+		t.Fatalf("GetScriptStats failed: %v", err)
+	}
+	if stats.TotalScripts != 2 || stats.TotalFiles != 3 {
+		t.Fatalf("unexpected script stats: %+v", stats)
+	}
+}
+
 func TestParseJTLResultsPrefersTransactionThroughput(t *testing.T) {
 	dir := t.TempDir()
 	resultPath := filepath.Join(dir, "result.jtl")

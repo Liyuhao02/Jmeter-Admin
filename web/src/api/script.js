@@ -1,6 +1,11 @@
 import request from './request'
 
 export const scriptApi = {
+  // 获取脚本统计
+  getStats() {
+    return request.get('/api/scripts/stats')
+  },
+
   // 获取脚本列表
   getList(params) {
     const normalizedParams = { ...params }

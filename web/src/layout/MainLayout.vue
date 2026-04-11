@@ -40,7 +40,16 @@
       <div class="content-wrapper" :class="{ 'content-wrapper--wide': isScriptEditPage }">
         <router-view v-slot="{ Component }">
           <transition name="page-fade" mode="out-in">
-            <component :is="Component" />
+            <Suspense>
+              <component :is="Component" />
+              <template #fallback>
+                <div class="route-loading-shell">
+                  <div class="route-loading-badge">LOADING</div>
+                  <div class="route-loading-title">页面资源加载中</div>
+                  <div class="route-loading-desc">正在按需加载当前页面模块，这样首屏会更轻，切页也更稳。</div>
+                </div>
+              </template>
+            </Suspense>
           </transition>
         </router-view>
       </div>
@@ -54,7 +63,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, Suspense } from 'vue'
 import { useRoute } from 'vue-router'
 import { Document, Monitor, DataLine } from '@element-plus/icons-vue'
 
@@ -195,6 +204,45 @@ const isScriptEditPage = computed(() => {
 .content-wrapper--wide {
   max-width: none;
   padding: 16px 20px 20px;
+}
+
+.route-loading-shell {
+  min-height: 360px;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at top left, rgba(0, 170, 255, 0.16), transparent 35%),
+    linear-gradient(180deg, rgba(17, 24, 39, 0.98), rgba(10, 14, 23, 0.96));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 12px;
+  padding: 32px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.24);
+}
+
+.route-loading-badge {
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(0, 170, 255, 0.12);
+  color: #36bffa;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.route-loading-title {
+  font-size: 28px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.route-loading-desc {
+  max-width: 520px;
+  font-size: 14px;
+  line-height: 1.8;
+  color: rgba(255, 255, 255, 0.64);
 }
 
 // 底部

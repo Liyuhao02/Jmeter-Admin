@@ -24,6 +24,7 @@ func SetupRouter(frontendFS embed.FS) *gin.Engine {
 		scripts := api.Group("/scripts")
 		{
 			scripts.GET("", handler.ListScripts)
+			scripts.GET("/stats", handler.GetScriptStats)
 			scripts.POST("", handler.CreateScript)
 			scripts.GET("/:id", handler.GetScript)
 			scripts.GET("/:id/dependencies", handler.GetScriptDependencies)

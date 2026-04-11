@@ -84,6 +84,20 @@ func ListScripts(page, pageSize int, keyword string) ([]model.Script, int64, err
 	return scripts, total, nil
 }
 
+func GetScriptStats() (*model.ScriptStats, error) {
+	stats := &model.ScriptStats{}
+
+	if err := database.DB.QueryRow("SELECT COUNT(*) FROM scripts").Scan(&stats.TotalScripts); err != nil {
+		return nil, fmt.Errorf("查询脚本总数失败: %w", err)
+	}
+
+	if err := database.DB.QueryRow("SELECT COUNT(*) FROM script_files").Scan(&stats.TotalFiles); err != nil {
+		return nil, fmt.Errorf("查询脚本文件总数失败: %w", err)
+	}
+
+	return stats, nil
+}
+
 // CreateScript 创建脚本记录
 func CreateScript(name, description string) (*model.Script, error) {
 	now := time.Now().Format("2006-01-02 15:04:05")

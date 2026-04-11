@@ -213,6 +213,7 @@
 
     <!-- 执行弹窗 -->
     <ExecuteDialog
+      v-if="executeDialogVisible"
       v-model:visible="executeDialogVisible"
       :script-id="currentScriptId"
       :script-name="currentScriptName"
@@ -266,7 +267,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, reactive } from 'vue'
+import { ref, onMounted, reactive, defineAsyncComponent } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -284,8 +285,9 @@ import {
 import { scriptApi } from '@/api/script'
 import { executionApi } from '@/api/execution'
 import FileUpload from '@/components/FileUpload.vue'
-import ExecuteDialog from '@/components/ExecuteDialog.vue'
 import { formatDateTimeInShanghai } from '@/utils/datetime'
+
+const ExecuteDialog = defineAsyncComponent(() => import('@/components/ExecuteDialog.vue'))
 
 const router = useRouter()
 
@@ -352,19 +354,15 @@ const showGuide = ref(false)
 const fetchStats = async () => {
   statsLoading.value = true
   try {
-    // 获取脚本列表计算总数
-    const scriptsRes = await scriptApi.getList({ page: 1, pageSize: 9999 })
-    const scripts = scriptsRes.data?.list || []
-    stats.totalScripts = scripts.length
-    stats.totalFiles = scripts.reduce((sum, s) => sum + (s.file_count || 0), 0)
+    const [scriptStatsRes, executionStatsRes] = await Promise.all([
+      scriptApi.getStats(),
+      executionApi.getStats()
+    ])
 
-    // 获取执行记录数
-    const execRes = await executionApi.getList({ page: 1, pageSize: 1 })
-    stats.executionCount = execRes.data?.total || 0
-
-    // 获取运行中的数量
-    const runningRes = await executionApi.getList({ page: 1, pageSize: 9999, status: 'running' })
-    stats.runningCount = runningRes.data?.total || 0
+    stats.totalScripts = scriptStatsRes.data?.total_scripts || 0
+    stats.totalFiles = scriptStatsRes.data?.total_files || 0
+    stats.executionCount = executionStatsRes.data?.total || 0
+    stats.runningCount = executionStatsRes.data?.running || 0
   } catch (error) {
     console.error('获取统计数据失败:', error)
   } finally {
