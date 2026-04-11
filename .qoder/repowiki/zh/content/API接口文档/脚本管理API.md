@@ -14,6 +14,13 @@
 - [jmxParser.js](file://web/src/utils/jmxParser.js)
 </cite>
 
+## 更新摘要
+**变更内容**
+- 新增脚本统计接口：`/api/scripts/stats` 端点
+- 添加 `ScriptStats` 数据模型定义
+- 更新路由配置以包含统计接口
+- 更新前端API封装以支持统计功能
+
 ## 目录
 1. [简介](#简介)
 2. [项目结构](#项目结构)
@@ -30,6 +37,8 @@
 脚本管理API是JMeter管理系统的核心功能模块，负责管理JMeter测试脚本的完整生命周期。该API提供了完整的CRUD操作，支持脚本的创建、查询、更新、删除，以及脚本内容的XML管理、文件上传下载等高级功能。
 
 系统采用Go语言开发，使用Gin框架构建RESTful API，SQLite作为数据存储，前端使用Vue.js配合Element Plus构建用户界面。所有API响应都遵循统一的JSON格式规范，便于前后端交互和错误处理。
+
+**更新** 新增了脚本统计功能，提供系统中脚本和文件的实时统计信息。
 
 ## 项目结构
 
@@ -73,7 +82,7 @@ API --> Editor
 
 ### 数据模型
 
-系统使用两个核心数据模型来管理脚本信息：
+系统使用多个核心数据模型来管理脚本信息，包括新增的统计模型：
 
 ```mermaid
 classDiagram
@@ -96,6 +105,10 @@ class ScriptFile {
 +string created_at
 +string updated_at
 }
+class ScriptStats {
++int64 total_scripts
++int64 total_files
+}
 class Response {
 +int code
 +string message
@@ -107,15 +120,17 @@ class PageData {
 }
 Script --> ScriptFile : "一对多关联"
 Response --> PageData : "分页响应"
+Response --> ScriptStats : "统计响应"
 ```
 
 **图表来源**
 - [script.go:3-23](file://internal/model/script.go#L3-L23)
+- [script.go:43-46](file://internal/model/script.go#L43-L46)
 - [response.go:3-46](file://internal/model/response.go#L3-L46)
 
 ### 数据库架构
 
-系统使用SQLite数据库存储脚本信息，包含三个核心表：
+系统使用SQLite数据库存储脚本信息，包含四个核心表：
 
 | 表名 | 字段 | 类型 | 描述 |
 |------|------|------|------|
@@ -132,6 +147,13 @@ Response --> PageData : "分页响应"
 | script_files | file_type | TEXT NOT NULL | 文件类型 |
 | script_files | created_at | DATETIME | 创建时间 |
 | script_files | updated_at | DATETIME | 更新时间 |
+| script_versions | id | INTEGER PRIMARY KEY AUTOINCREMENT | 脚本版本表 |
+| script_versions | script_id | INTEGER NOT NULL | 关联脚本ID |
+| script_versions | version_number | INTEGER NOT NULL | 版本号 |
+| script_versions | content | TEXT | 版本内容 |
+| script_versions | content_hash | TEXT | 内容哈希值 |
+| script_versions | change_summary | TEXT | 变更摘要 |
+| script_versions | created_at | DATETIME | 创建时间 |
 
 **章节来源**
 - [db.go:36-64](file://internal/database/db.go#L36-L64)
@@ -220,6 +242,32 @@ Handler-->>Client : JSON响应
 **章节来源**
 - [script.go:37-194](file://internal/handler/script.go#L37-L194)
 - [script.go:18-83](file://internal/service/script.go#L18-L83)
+
+### 脚本统计接口
+
+#### 获取系统统计信息
+- **HTTP方法**: GET
+- **URL路径**: `/api/scripts/stats`
+- **查询参数**: 无
+- **响应格式**: 
+  ```json
+  {
+    "code": 0,
+    "message": "success",
+    "data": {
+      "total_scripts": 150,
+      "total_files": 420
+    }
+  }
+  ```
+- **状态码**: 200 成功，500 服务器错误
+
+**更新** 新增的统计接口，提供系统中脚本和文件的实时统计信息。
+
+**章节来源**
+- [script.go:52-60](file://internal/handler/script.go#L52-L60)
+- [script.go:87-99](file://internal/service/script.go#L87-L99)
+- [script.go:43-46](file://internal/model/script.go#L43-L46)
 
 ### 脚本内容管理API
 
@@ -415,6 +463,18 @@ Router --> Gin
 - 验证数据库连接权限
 - 重启服务进程
 
+#### 4. 统计接口异常
+**症状**: 获取统计信息失败
+**可能原因**:
+- 数据库查询错误
+- 权限不足
+- 数据库连接问题
+
+**解决方法**:
+- 检查数据库连接状态
+- 验证统计查询权限
+- 查看服务器日志获取详细错误信息
+
 **章节来源**
 - [script.go:16-20](file://internal/handler/script.go#L16-L20)
 - [script.go:282-297](file://internal/service/script.go#L282-L297)
@@ -428,5 +488,8 @@ Router --> Gin
 3. **强大的JMX处理**: 提供XML格式校验和内容管理
 4. **统一的错误处理**: 标准化的响应格式和错误码
 5. **安全的文件处理**: 防止路径穿越攻击和文件注入
+6. **实时统计监控**: 新增的统计接口提供系统运行状态监控
 
 系统采用模块化设计，各层职责清晰，易于维护和扩展。通过合理的性能优化和错误处理机制，确保了系统的稳定性和可靠性。
+
+**更新** 新增的统计功能为系统监控和运维提供了重要支撑，帮助管理员实时了解脚本和文件的使用情况。
