@@ -44,3 +44,28 @@ type Slave struct {
 	AgentUptime    int64  `json:"agent_uptime,omitempty"` // Agent 运行秒数
 	CreatedAt      string `json:"created_at"`
 }
+
+type SlavePreflightNode struct {
+	ID                 int64             `json:"id"`
+	Name               string            `json:"name"`
+	Host               string            `json:"host"`
+	Port               int               `json:"port"`
+	AgentPort          int               `json:"agent_port"`
+	JMeterOnline       bool              `json:"jmeter_online"`
+	AgentOnline        bool              `json:"agent_online"`
+	CallbackReachable  bool              `json:"callback_reachable"`
+	CallbackLatencyMS  int64             `json:"callback_latency_ms,omitempty"`
+	CallbackStatusCode int               `json:"callback_status_code,omitempty"`
+	CallbackError      string            `json:"callback_error,omitempty"`
+	Suggestion         string            `json:"suggestion,omitempty"`
+	SystemStats        *AgentSystemStats `json:"system_stats,omitempty"`
+}
+
+type SlavePreflightReport struct {
+	MasterHost        string               `json:"master_host"`
+	MasterCallbackURL string               `json:"master_callback_url"`
+	SelectedCount     int                  `json:"selected_count"`
+	ReadyCount        int                  `json:"ready_count"`
+	Warnings          []string             `json:"warnings,omitempty"`
+	Nodes             []SlavePreflightNode `json:"nodes"`
+}

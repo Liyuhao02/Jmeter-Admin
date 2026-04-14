@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"jmeter-admin/config"
 	"jmeter-admin/internal/database"
 	"jmeter-admin/internal/model"
 )
@@ -277,6 +278,112 @@ func CheckSlaveCallbackReachability(slave model.Slave, callbackURL string) (*Cal
 		LatencyMS:  result.LatencyMS,
 		Error:      result.Error,
 	}, nil
+}
+
+func parseAgentSystemStats(raw string) *model.AgentSystemStats {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var stats model.AgentSystemStats
+	if err := json.Unmarshal([]byte(raw), &stats); err != nil {
+		return nil
+	}
+	return &stats
+}
+
+func GetSlavePreflightReport(slaveIDs []int64, masterHost string) (*model.SlavePreflightReport, error) {
+	slaves, err := ListSlaves()
+	if err != nil {
+		return nil, err
+	}
+
+	selectedSet := make(map[int64]bool)
+	for _, id := range slaveIDs {
+		selectedSet[id] = true
+	}
+
+	selected := make([]model.Slave, 0, len(slaveIDs))
+	for _, slave := range slaves {
+		if len(selectedSet) > 0 && !selectedSet[slave.ID] {
+			continue
+		}
+		selected = append(selected, slave)
+	}
+
+	callbackURL := ""
+	trimmedMasterHost := strings.TrimSpace(masterHost)
+	if trimmedMasterHost == "" {
+		trimmedMasterHost = strings.TrimSpace(config.GlobalConfig.JMeter.MasterHostname)
+	}
+	if trimmedMasterHost != "" {
+		callbackURL = fmt.Sprintf("http://%s:%d/api/executions/callback-probe", trimmedMasterHost, config.GlobalConfig.Server.Port)
+	}
+
+	report := &model.SlavePreflightReport{
+		MasterHost:        trimmedMasterHost,
+		MasterCallbackURL: callbackURL,
+		SelectedCount:     len(selected),
+		Warnings:          []string{},
+		Nodes:             make([]model.SlavePreflightNode, 0, len(selected)),
+	}
+
+	if trimmedMasterHost == "" {
+		report.Warnings = append(report.Warnings, "未配置 Master 回调地址，当前只能检测节点存活，无法验证 Slave 是否能把结果回传回来。")
+	}
+
+	for _, slave := range selected {
+		diag, err := CheckSlaveBoth(slave.ID)
+		if err != nil {
+			report.Nodes = append(report.Nodes, model.SlavePreflightNode{
+				ID:         slave.ID,
+				Name:       slave.Name,
+				Host:       slave.Host,
+				Port:       slave.Port,
+				AgentPort:  slave.AgentPort,
+				Suggestion: err.Error(),
+			})
+			continue
+		}
+
+		node := model.SlavePreflightNode{
+			ID:           slave.ID,
+			Name:         slave.Name,
+			Host:         slave.Host,
+			Port:         slave.Port,
+			AgentPort:    slave.AgentPort,
+			JMeterOnline: diag.JMeterOnline,
+			AgentOnline:  diag.AgentOnline,
+			Suggestion:   diag.Suggestion,
+			SystemStats:  parseAgentSystemStats(slave.SystemStats),
+		}
+
+		if callbackURL != "" && diag.AgentOnline {
+			result, callbackErr := CheckSlaveCallbackReachability(slave, callbackURL)
+			if callbackErr != nil {
+				node.CallbackError = callbackErr.Error()
+			} else if result != nil {
+				node.CallbackReachable = result.Reachable
+				node.CallbackLatencyMS = result.LatencyMS
+				node.CallbackStatusCode = result.StatusCode
+				node.CallbackError = result.Error
+			}
+		}
+
+		if node.JMeterOnline && node.AgentOnline && (callbackURL == "" || node.CallbackReachable) {
+			report.ReadyCount += 1
+		}
+
+		report.Nodes = append(report.Nodes, node)
+	}
+
+	if report.SelectedCount == 0 {
+		report.Warnings = append(report.Warnings, "当前未选中任何 Slave 节点。")
+	}
+	if report.ReadyCount < report.SelectedCount && report.SelectedCount > 0 {
+		report.Warnings = append(report.Warnings, fmt.Sprintf("仅 %d/%d 个节点通过执行前体检，建议优先修复异常节点后再执行。", report.ReadyCount, report.SelectedCount))
+	}
+
+	return report, nil
 }
 
 // generateSuggestion 根据诊断结果生成建议

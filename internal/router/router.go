@@ -44,6 +44,7 @@ func SetupRouter(frontendFS embed.FS) *gin.Engine {
 		slaves := api.Group("/slaves")
 		{
 			slaves.GET("", handler.ListSlaves)
+			slaves.GET("/preflight", handler.GetSlavePreflight)
 			slaves.POST("", handler.CreateSlave)
 			slaves.PUT("/:id", handler.UpdateSlave)
 			slaves.DELETE("/:id", handler.DeleteSlave)
@@ -60,6 +61,7 @@ func SetupRouter(frontendFS embed.FS) *gin.Engine {
 			executions.GET("/callback-probe", handler.CallbackProbe)
 			executions.POST("", handler.CreateExecution)
 			executions.GET("/:id", handler.GetExecution)
+			executions.GET("/:id/stream", handler.GetExecutionStream)
 			executions.GET("/:id/live-metrics", handler.GetExecutionLiveMetrics)
 			executions.GET("/:id/node-metrics", handler.GetExecutionNodeMetrics)
 			executions.PUT("/:id/baseline", handler.SetBaseline)
@@ -71,6 +73,7 @@ func SetupRouter(frontendFS embed.FS) *gin.Engine {
 			executions.GET("/:id/download/jtl", handler.DownloadResultFile)
 			executions.GET("/:id/download/report", handler.DownloadReport)
 			executions.GET("/:id/download/errors", handler.ExportErrors)
+			executions.GET("/:id/download/error-report", handler.DownloadErrorReport)
 			executions.GET("/:id/download/all", handler.DownloadAll)
 		}
 

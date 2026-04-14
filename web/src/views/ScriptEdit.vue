@@ -318,13 +318,39 @@
       class="diff-dialog"
     >
       <div class="diff-dialog-body">
-        <div v-if="saveRiskReport.summary.length || saveRiskReport.blockingIssues.length || saveRiskReport.warnings.length" class="save-risk-panel">
+        <div v-if="saveRiskReport.preflight || saveRiskReport.summary.length || saveRiskReport.blockingIssues.length || saveRiskReport.warnings.length" class="save-risk-panel">
           <div class="save-risk-header">
             <span class="save-risk-title">保存前风险检查</span>
             <div class="save-risk-chips" v-if="saveRiskReport.summary.length">
               <span v-for="item in saveRiskReport.summary" :key="item.label" class="save-risk-chip">
                 {{ item.label }} {{ item.count }}
               </span>
+            </div>
+          </div>
+          <div v-if="saveRiskReport.preflight" class="save-risk-overview" :class="`is-${saveRiskReport.preflight.level || 'success'}`">
+            <div class="save-risk-overview-header">
+              <div>
+                <div class="save-risk-overview-row">
+                  <span class="save-risk-overview-badge" :class="`is-${saveRiskReport.preflight.level || 'success'}`">
+                    {{ saveRiskReport.preflight.level === 'danger' ? '高风险' : saveRiskReport.preflight.level === 'warning' ? '需关注' : '可保存' }}
+                  </span>
+                  <span class="save-risk-overview-title">结构体检</span>
+                </div>
+                <div class="save-risk-overview-summary">
+                  当前主指标口径：{{ saveRiskReport.preflight.metricMode || '未知' }}
+                </div>
+              </div>
+              <div class="save-risk-overview-score">
+                <span class="save-risk-overview-score-label">健康分</span>
+                <span class="save-risk-overview-score-value">{{ saveRiskReport.preflight.score }}</span>
+              </div>
+            </div>
+            <div v-if="saveRiskReport.preflight.facts?.length" class="save-risk-facts-grid">
+              <div v-for="fact in saveRiskReport.preflight.facts" :key="fact.label" class="save-risk-fact-card">
+                <div class="save-risk-fact-label">{{ fact.label }}</div>
+                <div class="save-risk-fact-value">{{ fact.value }}</div>
+                <div class="save-risk-fact-detail">{{ fact.detail || '-' }}</div>
+              </div>
             </div>
           </div>
           <div v-if="saveRiskReport.blockingIssues.length" class="save-risk-list is-blocking">
@@ -337,6 +363,12 @@
             <div v-for="item in saveRiskReport.warnings" :key="item.title" class="save-risk-item">
               <strong>{{ item.title }}</strong>
               <span>{{ item.detail }}</span>
+            </div>
+          </div>
+          <div v-if="saveRiskReport.preflight?.recommendations?.length" class="save-risk-list is-suggestion">
+            <div v-for="item in saveRiskReport.preflight.recommendations" :key="item" class="save-risk-item">
+              <strong>建议</strong>
+              <span>{{ item }}</span>
             </div>
           </div>
         </div>
@@ -454,7 +486,8 @@ const savePreviewVisible = ref(false)
 const saveRiskReport = ref({
   summary: [],
   blockingIssues: [],
-  warnings: []
+  warnings: [],
+  preflight: null
 })
 
 // 版本管理相关状态
@@ -1144,8 +1177,8 @@ onBeforeUnmount(() => {
   height: 100%;
   background-color: var(--bg-primary);
   overflow: hidden;
-  padding: 10px;
-  gap: 14px;
+  padding: 4px 0 10px;
+  gap: 12px;
 }
 
 // 区域卡片
@@ -1167,20 +1200,20 @@ onBeforeUnmount(() => {
 
 .section-title {
   color: var(--text-primary);
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 
 .section-header {
-  padding-bottom: 16px;
+  padding-bottom: 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 
 // 顶部操作栏
 .header-section {
-  padding: 14px 18px;
+  padding: 12px 16px;
   flex-shrink: 0;
 }
 
@@ -1195,7 +1228,7 @@ onBeforeUnmount(() => {
 .header-left {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
 }
 
 .back-btn {
@@ -1259,7 +1292,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 20px;
+  padding: 7px 16px;
   border-radius: 20px;
   border: 1px solid transparent;
   background: transparent;
@@ -1320,10 +1353,10 @@ onBeforeUnmount(() => {
 // 主体区域
 .main-area {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) clamp(236px, 14vw, 288px);
+  grid-template-columns: minmax(0, 1fr) clamp(220px, 13vw, 268px);
   flex: 1;
   overflow: hidden;
-  gap: 14px;
+  gap: 12px;
   min-height: 0;
   align-items: stretch;
 }
@@ -1395,19 +1428,19 @@ onBeforeUnmount(() => {
 
 // 右侧文件面板
 .file-panel {
-  width: clamp(236px, 14vw, 288px);
-  max-width: clamp(236px, 14vw, 288px);
-  min-width: clamp(236px, 14vw, 288px);
+  width: clamp(220px, 13vw, 268px);
+  max-width: clamp(220px, 13vw, 268px);
+  min-width: clamp(220px, 13vw, 268px);
   display: flex;
   flex-direction: column;
-  padding: 16px;
+  padding: 14px;
   margin-bottom: 0;
 }
 
 .file-list {
   flex: 1;
   overflow-y: auto;
-  padding: 0 0 16px 0;
+  padding: 0 0 12px 0;
   min-height: 0;
 }
 
@@ -1415,7 +1448,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px;
+  padding: 10px;
   margin-bottom: 8px;
   background-color: var(--bg-secondary);
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -1431,8 +1464,8 @@ onBeforeUnmount(() => {
   }
 
   .file-icon {
-    width: 36px;
-    height: 36px;
+    width: 34px;
+    height: 34px;
     border-radius: var(--radius-sm);
     display: flex;
     align-items: center;
@@ -1514,7 +1547,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 40px 20px;
+  padding: 32px 18px;
   color: var(--text-secondary);
 
   .el-icon {
@@ -1529,7 +1562,7 @@ onBeforeUnmount(() => {
 }
 
 .upload-area {
-  padding-top: 16px;
+  padding-top: 14px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
@@ -1546,7 +1579,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 16px;
+  padding: 14px;
   border: 2px dashed rgba(255, 255, 255, 0.1);
   border-radius: var(--radius-md);
   cursor: pointer;
@@ -1573,7 +1606,7 @@ onBeforeUnmount(() => {
 
 // 文件分组
 .file-group {
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 
   .file-group-title {
     display: flex;
@@ -1599,8 +1632,8 @@ onBeforeUnmount(() => {
   background: rgba(255, 193, 7, 0.1);
   border: 1px solid rgba(255, 193, 7, 0.3);
   border-radius: var(--radius-md);
-  padding: 12px 16px;
-  margin-bottom: 16px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
 
   .warning-header {
     display: flex;
@@ -1772,6 +1805,122 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.save-risk-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(24, 34, 52, 0.82));
+  border: 1px solid rgba(34, 197, 94, 0.16);
+
+  &.is-warning {
+    border-color: rgba(255, 184, 0, 0.2);
+  }
+
+  &.is-danger {
+    border-color: rgba(255, 92, 92, 0.24);
+  }
+}
+
+.save-risk-overview-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.save-risk-overview-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.save-risk-overview-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, 0.16);
+  color: #4ade80;
+  font-size: 11px;
+  font-weight: 700;
+
+  &.is-warning {
+    background: rgba(255, 184, 0, 0.16);
+    color: #fbbf24;
+  }
+
+  &.is-danger {
+    background: rgba(255, 92, 92, 0.16);
+    color: #f87171;
+  }
+}
+
+.save-risk-overview-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.save-risk-overview-summary {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.save-risk-overview-score {
+  min-width: 90px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.save-risk-overview-score-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.save-risk-overview-score-value {
+  font-size: 30px;
+  line-height: 1;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.save-risk-facts-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.save-risk-fact-card {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.save-risk-fact-label {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.save-risk-fact-value {
+  margin-top: 8px;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.save-risk-fact-detail {
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .save-risk-item {
   display: flex;
   flex-direction: column;
@@ -1799,6 +1948,11 @@ onBeforeUnmount(() => {
 .save-risk-list.is-warning .save-risk-item {
   border: 1px solid rgba(255, 184, 0, 0.24);
   background: rgba(255, 184, 0, 0.06);
+}
+
+.save-risk-list.is-suggestion .save-risk-item {
+  border: 1px solid rgba(0, 153, 255, 0.18);
+  background: rgba(0, 153, 255, 0.06);
 }
 
 .diff-summary {

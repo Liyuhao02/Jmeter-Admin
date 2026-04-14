@@ -12,14 +12,17 @@
 html,
 body {
   height: 100%;
-  font-family: 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB',
-    'Microsoft YaHei', '微软雅黑', Arial, sans-serif;
+  font-family: 'SF Pro Display', 'SF Pro Text', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', '微软雅黑', 'Helvetica Neue', Arial, sans-serif;
   font-size: 14px;
   line-height: 1.5;
   color: #e2e8f0;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: #0a0e17;
+  background:
+    radial-gradient(circle at top center, rgba(56, 189, 248, 0.08), transparent 26%),
+    radial-gradient(circle at 10% 90%, rgba(0, 102, 255, 0.06), transparent 22%),
+    #0a0e17;
 }
 
 #app {
@@ -58,6 +61,7 @@ body {
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-xl: 0 24px 64px rgba(2, 8, 23, 0.3);
 
   // 过渡时间统一
   --transition-fast: 0.15s ease;
@@ -68,8 +72,11 @@ body {
   --bg-primary: #0a0e17;
   --bg-secondary: #111827;
   --bg-card: #1a2332;
+  --bg-card-elevated: #202b3d;
+  --bg-panel: rgba(15, 23, 42, 0.72);
   --bg-hover: #1e2a3a;
   --border-color: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.1);
   --border-glow: #00aaff;
   --text-primary: #e2e8f0;
   --text-secondary: #94a3b8;
@@ -207,19 +214,25 @@ body {
 
 // 区域分隔卡片样式
 .section-card {
-  background: var(--bg-card);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(255, 255, 255, 0)),
+    var(--bg-card);
   border-radius: var(--radius-lg);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-color);
   padding: 24px;
   margin-bottom: 20px;
+  box-shadow: var(--shadow-md);
 }
 
 // 页面卡片样式
 .page-card {
-  background-color: var(--bg-card);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(255, 255, 255, 0)),
+    var(--bg-card);
   border-radius: var(--radius-lg);
   padding: 24px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-color);
+  box-shadow: var(--shadow-md);
 }
 
 // 页面标题
@@ -256,26 +269,30 @@ body {
 // 按钮 - 大圆角/胶囊形
 .el-button {
   border-radius: var(--radius-md) !important;
-  font-weight: 500;
+  min-height: 40px;
+  font-weight: 600;
   padding: 10px 24px;
-  transition: all 0.2s ease;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease, border-color 0.16s ease;
 
-  &:hover {
+  &:hover:not(.is-disabled):not(:disabled) {
+    transform: translateY(-1px);
     opacity: 0.85;
   }
 
   &:active {
+    transform: translateY(0);
     opacity: 0.7;
   }
 }
 
 .el-button--primary {
-  background: #0066ff;
-  border-color: #0066ff;
+  background: linear-gradient(135deg, #1677ff, #1ea8ff);
+  border-color: rgba(30, 168, 255, 0.8);
+  box-shadow: 0 10px 28px rgba(22, 119, 255, 0.2);
 
   &:hover {
-    background: #0077ff;
-    border-color: #0077ff;
+    background: linear-gradient(135deg, #2a84ff, #42b9ff);
+    border-color: rgba(66, 185, 255, 0.88);
     opacity: 1;
   }
 }
@@ -316,18 +333,19 @@ body {
 // 小尺寸按钮
 .el-button--small {
   border-radius: var(--radius-sm) !important;
-  padding: 6px 16px;
+  min-height: 34px;
+  padding: 6px 14px;
   font-size: 13px;
 }
 
 // 默认按钮（描边风格）
 .el-button--default {
-  background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   color: var(--text-primary);
 
   &:hover {
-    border-color: rgba(255, 255, 255, 0.4);
+    border-color: rgba(255, 255, 255, 0.22);
     background: rgba(255, 255, 255, 0.05);
     color: var(--text-primary);
     opacity: 1;
@@ -338,6 +356,10 @@ body {
 .el-button--text,
 .el-button.is-text,
 .el-button.is-link {
+  min-height: auto;
+  padding: 4px 6px;
+  border-radius: 10px !important;
+
   &:hover {
     background: transparent !important;
     opacity: 0.8;
@@ -346,10 +368,11 @@ body {
 
 // Element Plus 表格暗色主题
 .el-table {
-  background-color: var(--bg-card) !important;
+  background-color: transparent !important;
   border-radius: var(--radius-lg) !important;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid var(--border-color) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
 
   // 去掉默认边框
   &::before,
@@ -358,29 +381,30 @@ body {
   }
 
   tr {
-    background-color: var(--bg-card) !important;
+    background-color: transparent !important;
   }
 
   // 表头
   th.el-table__cell {
-    background-color: rgba(255, 255, 255, 0.03) !important;
+    background-color: rgba(255, 255, 255, 0.035) !important;
     color: var(--text-secondary) !important;
-    font-weight: 500 !important;
+    font-weight: 600 !important;
     font-size: 13px !important;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
-    padding: 12px 0 !important;
+    padding: 14px 0 !important;
   }
 
   // 内容行
   td.el-table__cell {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04) !important;
+    background-color: rgba(26, 35, 50, 0.86) !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.035) !important;
     color: var(--text-primary) !important;
-    padding: 14px 0 !important;
+    padding: 15px 0 !important;
   }
 
   // 行 hover - 非常微妙，不要任何花哨效果
   .el-table__body tr:hover > td.el-table__cell {
-    background-color: rgba(255, 255, 255, 0.02) !important;
+    background-color: rgba(255, 255, 255, 0.03) !important;
   }
 
   // 去掉所有 ::before 伪元素（蓝色竖线等）
@@ -403,17 +427,20 @@ body {
 
 // 输入框样式
 .el-input__wrapper {
-  background-color: rgba(255, 255, 255, 0.05) !important;
+  min-height: 42px;
+  background-color: rgba(255, 255, 255, 0.04) !important;
   border: 1px solid rgba(255, 255, 255, 0.1) !important;
   box-shadow: none !important;
   border-radius: var(--radius-md) !important;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background-color 0.16s ease;
 
   &:hover {
     border-color: rgba(255, 255, 255, 0.2) !important;
   }
   &.is-focus {
-    border-color: #0066ff !important;
-    box-shadow: 0 0 0 2px rgba(0, 102, 255, 0.1) !important;
+    border-color: #1ea8ff !important;
+    box-shadow: 0 0 0 3px rgba(30, 168, 255, 0.12) !important;
+    background-color: rgba(255, 255, 255, 0.05) !important;
   }
 
   .el-input__inner {
@@ -738,6 +765,7 @@ body {
   background: var(--bg-card) !important;
   border-radius: var(--radius-xl) !important;
   border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  box-shadow: var(--shadow-xl) !important;
 
   .el-dialog__header {
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);

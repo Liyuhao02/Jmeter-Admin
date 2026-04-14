@@ -28,7 +28,7 @@
     >
       <svg
         :viewBox="`0 0 ${svgWidth} ${svgHeight}`"
-        preserveAspectRatio="none"
+        preserveAspectRatio="xMidYMid meet"
         class="metric-trend-svg"
         :style="{ height: `${height}px` }"
       >
@@ -69,6 +69,7 @@
           :key="`x-${tick.index}`"
           :x="tick.x"
           :y="svgHeight - 10"
+          :text-anchor="tick.anchor"
           class="axis-text axis-text-x"
         >
           {{ tick.label }}
@@ -140,7 +141,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 const props = defineProps({
   title: { type: String, required: true },
@@ -161,18 +162,59 @@ const props = defineProps({
 
 defineEmits(['expand'])
 
-const svgWidth = 420
+const chartRef = ref(null)
+const svgWidth = ref(520)
 const svgHeight = computed(() => props.height)
-const chartLeft = computed(() => (props.height >= 320 ? 72 : 60))
-const chartRight = computed(() => svgWidth - 14)
+const chartLeft = computed(() => (props.height >= 320 ? 78 : 68))
+const chartRight = computed(() => {
+  const rightPadding = props.height >= 320 ? 58 : 48
+  return Math.max(chartLeft.value + 92, svgWidth.value - rightPadding)
+})
 const chartTop = 12
-const chartBottom = computed(() => svgHeight.value - (props.height >= 320 ? 42 : 30))
+const chartBottom = computed(() => svgHeight.value - (props.height >= 320 ? 52 : 38))
 const chartWidth = computed(() => chartRight.value - chartLeft.value)
 const chartHeight = computed(() => chartBottom.value - chartTop)
 
-const chartRef = ref(null)
 const activeIndex = ref(-1)
 const tooltipVisible = ref(false)
+let resizeObserver = null
+
+const syncChartSize = () => {
+  if (!chartRef.value) return
+  const width = Math.round(chartRef.value.getBoundingClientRect().width || chartRef.value.clientWidth || 520)
+  svgWidth.value = Math.max(360, width)
+}
+
+onMounted(() => {
+  syncChartSize()
+
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(() => {
+      syncChartSize()
+    })
+
+    if (chartRef.value) {
+      resizeObserver.observe(chartRef.value)
+    }
+    return
+  }
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('resize', syncChartSize)
+  }
+})
+
+onBeforeUnmount(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+    return
+  }
+
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('resize', syncChartSize)
+  }
+})
 
 const chartData = computed(() => {
   return props.points.map((item, index) => ({
@@ -259,13 +301,14 @@ const xTicks = computed(() => {
   const points = chartPoints.value
   if (!points.length) return []
 
-  const tickCapacity = Math.max(2, Math.floor(chartWidth.value / 96))
+  const tickCapacity = Math.max(2, Math.floor(chartWidth.value / 126))
   const desired = Math.min(props.maxXTicks, tickCapacity, points.length - 1)
   if (desired <= 0) {
     return [{
       index: 0,
       x: points[0].x,
-      label: points[0].timestamp
+      label: formatXAxisLabel(points[0].timestamp),
+      anchor: 'start'
     }]
   }
 
@@ -273,10 +316,16 @@ const xTicks = computed(() => {
     return Math.round((idx / desired) * (points.length - 1))
   }).filter((value, idx, arr) => arr.indexOf(value) === idx)
 
-  return indices.map(index => ({
+  return indices.map((index, tickIndex) => ({
     index,
     x: points[index].x,
-    label: points[index].timestamp
+    label: formatXAxisLabel(points[index].timestamp),
+    anchor:
+      tickIndex === 0
+        ? 'start'
+        : tickIndex === indices.length - 1
+          ? 'end'
+          : 'middle'
   }))
 })
 
@@ -292,7 +341,7 @@ const secondActivePoint = computed(() => {
 
 const tooltipStyle = computed(() => {
   if (!activePoint.value) return {}
-  const positionX = Math.min(Math.max((activePoint.value.x / svgWidth) * 100, 18), 82)
+  const positionX = Math.min(Math.max((activePoint.value.x / svgWidth.value) * 100, 18), 82)
   const positionY = Math.min(Math.max((activePoint.value.y / svgHeight.value) * 100 - 6, 10), 74)
   return {
     left: `${positionX}%`,
@@ -318,6 +367,17 @@ const formatTickValue = (value) => {
   return formatMetricValue(value)
 }
 
+const formatXAxisLabel = (timestamp) => {
+  const text = String(timestamp || '')
+  if (!text) return '--'
+
+  if (text.includes(' ')) {
+    return text.split(' ').pop()
+  }
+
+  return text.length > 8 ? text.slice(0, 8) : text
+}
+
 const clearHover = () => {
   tooltipVisible.value = false
   activeIndex.value = -1
@@ -328,7 +388,7 @@ const handleHover = (event) => {
   const rect = chartRef.value.getBoundingClientRect()
   const relativeX = event.clientX - rect.left
   const ratio = rect.width > 0 ? relativeX / rect.width : 0
-  const svgX = ratio * svgWidth
+  const svgX = ratio * svgWidth.value
 
   const nearestIndex = chartPoints.value.reduce((bestIndex, point, index, points) => {
     if (bestIndex === -1) return index
@@ -342,61 +402,82 @@ const handleHover = (event) => {
 
 <style scoped lang="scss">
 .metric-trend-card {
-  padding: 18px;
-  border-radius: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.03);
+  min-width: 0;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.012)),
+    rgba(255, 255, 255, 0.02);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 .metric-trend-head {
   display: flex;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: 12px;
+  margin-bottom: 10px;
   align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.metric-trend-head > div:first-child {
+  flex: 1 1 220px;
+  min-width: 0;
 }
 
 .metric-trend-label {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.12em;
 }
 
 .metric-trend-value {
   margin-top: 8px;
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 6px 8px;
   color: var(--text-primary);
-  font-size: 28px;
+  font-size: clamp(22px, 2.2vw, 30px);
   font-weight: 700;
-  line-height: 1;
+  line-height: 1.05;
   font-family: 'Consolas', 'Monaco', 'Fira Code', monospace;
+  white-space: normal;
 }
 
 .metric-trend-unit {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--text-secondary);
-  margin-left: 6px;
 }
 
 .metric-trend-meta {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 11px;
   text-align: right;
+  max-width: 220px;
+  line-height: 1.6;
+  white-space: normal;
 }
 
 .metric-trend-actions {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .expand-btn {
   min-width: 54px;
-  height: 30px;
+  height: 32px;
   padding: 0 12px;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.05);
   color: var(--text-primary);
   font-size: 12px;
   cursor: pointer;
@@ -411,26 +492,34 @@ const handleHover = (event) => {
 
 .metric-trend-chart {
   position: relative;
+  padding-top: 2px;
 }
 
 .metric-trend-svg {
   width: 100%;
   display: block;
+  overflow: visible;
 }
 
 .axis-line {
   stroke: rgba(255, 255, 255, 0.12);
   stroke-width: 1;
+  vector-effect: non-scaling-stroke;
 }
 
 .grid-line {
   stroke: rgba(255, 255, 255, 0.08);
   stroke-dasharray: 4 6;
+  vector-effect: non-scaling-stroke;
 }
 
 .axis-text {
   fill: var(--text-secondary);
-  font-size: 10px;
+  font-size: 10.5px;
+  opacity: 0.92;
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
+  text-rendering: geometricPrecision;
 }
 
 .axis-text-y {
@@ -446,6 +535,7 @@ const handleHover = (event) => {
   stroke-width: 3;
   stroke-linejoin: round;
   stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
 }
 
 .trend-line.second-line {
@@ -461,6 +551,7 @@ const handleHover = (event) => {
 .hover-line {
   stroke: rgba(255, 255, 255, 0.24);
   stroke-dasharray: 4 4;
+  vector-effect: non-scaling-stroke;
 }
 
 .active-dot {
@@ -476,13 +567,14 @@ const handleHover = (event) => {
   position: absolute;
   z-index: 2;
   min-width: 148px;
-  padding: 10px 12px;
+  padding: 11px 12px;
   border-radius: 12px;
-  background: rgba(9, 14, 26, 0.96);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.28);
+  background: rgba(7, 11, 20, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.3);
   transform: translate(-50%, -100%);
   pointer-events: none;
+  backdrop-filter: blur(12px);
 }
 
 .metric-tooltip-time {
@@ -517,9 +609,27 @@ const handleHover = (event) => {
 }
 
 @media (max-width: 768px) {
+  .metric-trend-card {
+    padding: 13px;
+  }
+
+  .metric-trend-head {
+    gap: 10px;
+  }
+
   .metric-trend-actions {
     flex-direction: column;
     align-items: flex-end;
+    width: 100%;
+  }
+
+  .metric-trend-meta {
+    max-width: none;
+    text-align: left;
+  }
+
+  .metric-trend-value {
+    font-size: 22px;
   }
 }
 </style>

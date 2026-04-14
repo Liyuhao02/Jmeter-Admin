@@ -26,6 +26,11 @@ export const slaveApi = {
     return request.post(`/api/slaves/${id}/check`)
   },
 
+  // 执行前体检
+  getPreflight(params) {
+    return request.get('/api/slaves/preflight', { params })
+  },
+
   // 获取网络接口列表
   getNetworkInterfaces() {
     return request.get('/api/config/network-interfaces')
@@ -42,7 +47,7 @@ export const slaveApi = {
   },
 
   // 获取心跳状态
-  getHeartbeatStatus() {
-    return request.get('/api/slaves/heartbeat-status')
+  getHeartbeatStatus(options = {}) {
+    return request.get('/api/slaves/heartbeat-status', options)
   }
 }

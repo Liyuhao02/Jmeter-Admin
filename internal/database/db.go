@@ -89,6 +89,9 @@ func createTables() error {
 		end_time DATETIME,
 		duration INTEGER DEFAULT 0,
 		remarks TEXT,
+		save_http_details INTEGER DEFAULT 0,
+		include_master INTEGER DEFAULT 0,
+		split_csv INTEGER DEFAULT 0,
 		result_path TEXT,
 		report_path TEXT,
 		summary_data TEXT,
@@ -145,6 +148,33 @@ func migrateExecutionsTable() error {
 	if err == nil && remarksExists == 0 {
 		if _, err := DB.Exec("ALTER TABLE executions ADD COLUMN remarks TEXT"); err != nil {
 			return fmt.Errorf("添加 remarks 列失败: %w", err)
+		}
+	}
+
+	// 检查并添加 save_http_details 列
+	var saveHTTPDetailsExists int
+	err = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('executions') WHERE name='save_http_details'").Scan(&saveHTTPDetailsExists)
+	if err == nil && saveHTTPDetailsExists == 0 {
+		if _, err := DB.Exec("ALTER TABLE executions ADD COLUMN save_http_details INTEGER DEFAULT 0"); err != nil {
+			return fmt.Errorf("添加 save_http_details 列失败: %w", err)
+		}
+	}
+
+	// 检查并添加 include_master 列
+	var includeMasterExists int
+	err = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('executions') WHERE name='include_master'").Scan(&includeMasterExists)
+	if err == nil && includeMasterExists == 0 {
+		if _, err := DB.Exec("ALTER TABLE executions ADD COLUMN include_master INTEGER DEFAULT 0"); err != nil {
+			return fmt.Errorf("添加 include_master 列失败: %w", err)
+		}
+	}
+
+	// 检查并添加 split_csv 列
+	var splitCSVExists int
+	err = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('executions') WHERE name='split_csv'").Scan(&splitCSVExists)
+	if err == nil && splitCSVExists == 0 {
+		if _, err := DB.Exec("ALTER TABLE executions ADD COLUMN split_csv INTEGER DEFAULT 0"); err != nil {
+			return fmt.Errorf("添加 split_csv 列失败: %w", err)
 		}
 	}
 

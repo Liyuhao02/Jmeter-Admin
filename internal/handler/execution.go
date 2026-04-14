@@ -156,6 +156,93 @@ func GetExecutionLiveMetrics(c *gin.Context) {
 	c.JSON(http.StatusOK, model.Success(metrics))
 }
 
+func GetExecutionStream(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error("无效的执行ID"))
+		return
+	}
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, model.Error("当前环境不支持流式输出"))
+		return
+	}
+
+	var (
+		cachedNodes   = []gin.H{}
+		lastNodeFetch time.Time
+	)
+
+	sendSnapshot := func(forceNodeRefresh bool) bool {
+		execution, execErr := service.GetExecution(id)
+		if execErr != nil {
+			c.SSEvent("error", gin.H{"message": execErr.Error()})
+			flusher.Flush()
+			return false
+		}
+
+		liveMetrics, metricsErr := service.GetExecutionLiveMetrics(id)
+		if metricsErr != nil {
+			liveMetrics = &service.LiveExecutionMetrics{Status: execution.Status, Points: []service.LiveMetricPoint{}}
+		}
+
+		errorOverview, overviewErr := service.GetExecutionErrorOverview(id)
+		if overviewErr != nil {
+			errorOverview = nil
+		}
+
+		if forceNodeRefresh || lastNodeFetch.IsZero() || time.Since(lastNodeFetch) >= 9*time.Second {
+			nodes, nodeErr := collectExecutionNodeMetricsData(execution)
+			if nodeErr == nil {
+				cachedNodes = nodes
+				lastNodeFetch = time.Now()
+			}
+		}
+
+		c.SSEvent("snapshot", gin.H{
+			"server_time":    time.Now().Format("2006-01-02 15:04:05"),
+			"execution":      execution,
+			"live_metrics":   liveMetrics,
+			"error_overview": errorOverview,
+			"node_metrics":   cachedNodes,
+		})
+		flusher.Flush()
+
+		if execution.Status != "running" {
+			c.SSEvent("complete", gin.H{
+				"status": execution.Status,
+			})
+			flusher.Flush()
+			return false
+		}
+		return true
+	}
+
+	if !sendSnapshot(true) {
+		return
+	}
+
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-ticker.C:
+			if !sendSnapshot(false) {
+				return
+			}
+		}
+	}
+}
+
 // StopExecution 停止执行
 func StopExecution(c *gin.Context) {
 	idStr := c.Param("id")
@@ -446,6 +533,32 @@ func ExportErrors(c *gin.Context) {
 			fmt.Sprintf("%d", r.Bytes),
 		})
 	}
+}
+
+func DownloadErrorReport(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error("无效的执行ID"))
+		return
+	}
+
+	execution, err := service.GetExecution(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, model.Error(err.Error()))
+		return
+	}
+
+	analysis, err := service.GetExecutionErrors(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error("生成错误报告失败: "+err.Error()))
+		return
+	}
+
+	content := service.BuildExecutionErrorReportMarkdown(execution, analysis)
+	filename := fmt.Sprintf("execution_%d_error_report.md", id)
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	c.Header("Content-Type", "text/markdown; charset=utf-8")
+	c.String(http.StatusOK, content)
 }
 
 // DownloadAll 导出完整结果 ZIP 包
@@ -861,54 +974,31 @@ func collectMasterSystemStats() string {
 	return string(jsonBytes)
 }
 
-// GetExecutionNodeMetrics 获取执行节点的实时系统指标
-func GetExecutionNodeMetrics(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, model.Error("无效的执行ID"))
-		return
+func collectExecutionNodeMetricsData(execution *model.Execution) ([]gin.H, error) {
+	if execution == nil {
+		return nil, fmt.Errorf("执行记录不存在")
+	}
+	if execution.Status != "running" {
+		return []gin.H{}, nil
 	}
 
-	// 1. 获取执行记录
-	var slaveIDsJSON sql.NullString
-	var status string
-	err = database.DB.QueryRow(
-		"SELECT status, slave_ids FROM executions WHERE id = ?",
-		id,
-	).Scan(&status, &slaveIDsJSON)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, model.Error("执行记录不存在"))
-		} else {
-			c.JSON(http.StatusInternalServerError, model.Error("查询执行记录失败: "+err.Error()))
-		}
-		return
-	}
-
-	// 如果执行未在运行中，返回空数组
-	if status != "running" {
-		c.JSON(http.StatusOK, model.Success(gin.H{"nodes": []interface{}{}}))
-		return
-	}
-
-	// 2. 解析 slave_ids
 	var slaveIDs []int64
-	if slaveIDsJSON.Valid && slaveIDsJSON.String != "" {
-		if err := json.Unmarshal([]byte(slaveIDsJSON.String), &slaveIDs); err != nil {
-			// 解析失败，继续执行，slaveIDs 保持为空
+	if strings.TrimSpace(execution.SlaveIDs) != "" {
+		if err := json.Unmarshal([]byte(execution.SlaveIDs), &slaveIDs); err != nil {
 			slaveIDs = []int64{}
 		}
 	}
 
-	// 3. 查询 Slave 信息并获取 Agent 健康数据
 	nodes := []gin.H{}
-
-	// 添加 Master 节点
 	masterStats := collectMasterSystemStats()
 	masterHost := config.GlobalConfig.JMeter.MasterHostname
 	if masterHost == "" {
 		masterHost = "localhost"
+	}
+	masterParticipating := true
+	if execution.Diagnostics != nil {
+		mode := execution.Diagnostics.Mode
+		masterParticipating = mode == "local" || mode == "distributed_with_master" || execution.Diagnostics.IncludeMaster
 	}
 	nodes = append(nodes, gin.H{
 		"id":           0,
@@ -916,11 +1006,13 @@ func GetExecutionNodeMetrics(c *gin.Context) {
 		"host":         masterHost,
 		"role":         "master",
 		"online":       true,
+		"status":       "online",
+		"agent_status": "online",
+		"participating": masterParticipating,
 		"system_stats": masterStats,
 	})
 
 	for _, sid := range slaveIDs {
-		// 查询 slave 信息
 		var slave model.Slave
 		var lastCheckTime sql.NullString
 		var agentCheckTime sql.NullString
@@ -951,18 +1043,47 @@ func GetExecutionNodeMetrics(c *gin.Context) {
 			slave.AgentStatus = "unknown"
 		}
 
-		// 调用 CheckSlaveAgent 获取系统指标
 		result, _ := service.CheckSlaveAgent(&slave)
-
-		// 组装节点数据
 		nodes = append(nodes, gin.H{
-			"id":           slave.ID,
-			"name":         slave.Name,
-			"host":         slave.Host,
-			"role":         "slave",
-			"online":       result.Online,
-			"system_stats": result.SystemStats,
+			"id":            slave.ID,
+			"name":          slave.Name,
+			"host":          slave.Host,
+			"port":          slave.Port,
+			"role":          "slave",
+			"online":        result.Online,
+			"status":        slave.Status,
+			"agent_status":  slave.AgentStatus,
+			"agent_uptime":  result.AgentUptime,
+			"participating": true,
+			"system_stats":  result.SystemStats,
 		})
+	}
+
+	return nodes, nil
+}
+
+// GetExecutionNodeMetrics 获取执行节点的实时系统指标
+func GetExecutionNodeMetrics(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error("无效的执行ID"))
+		return
+	}
+
+	execution, err := service.GetExecution(id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, model.Error("执行记录不存在"))
+		} else {
+			c.JSON(http.StatusInternalServerError, model.Error("查询执行记录失败: "+err.Error()))
+		}
+		return
+	}
+
+	nodes, err := collectExecutionNodeMetricsData(execution)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error("获取节点指标失败: "+err.Error()))
+		return
 	}
 
 	c.JSON(http.StatusOK, model.Success(gin.H{"nodes": nodes}))

@@ -3,6 +3,7 @@ import MainLayout from '@/layout/MainLayout.vue'
 
 const ScriptList = () => import('@/views/ScriptList.vue')
 const ScriptEdit = () => import('@/views/ScriptEdit.vue')
+const ScriptExecute = () => import('@/views/ScriptExecute.vue')
 const SlaveManage = () => import('@/views/SlaveManage.vue')
 const ExecutionList = () => import('@/views/ExecutionList.vue')
 const ExecutionDetail = () => import('@/views/ExecutionDetail.vue')
@@ -24,6 +25,12 @@ const routes = [
         name: 'ScriptEdit',
         component: ScriptEdit,
         meta: { title: '编辑脚本' }
+      },
+      {
+        path: 'scripts/:id/execute',
+        name: 'ScriptExecute',
+        component: ScriptExecute,
+        meta: { title: '执行脚本' }
       },
       {
         path: 'slaves',

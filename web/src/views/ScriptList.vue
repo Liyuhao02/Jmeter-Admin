@@ -1,22 +1,69 @@
 <template>
   <div class="script-list-page">
+    <section class="workspace-hero">
+      <div class="workspace-hero-main">
+        <div class="workspace-copy">
+          <div class="workspace-kicker">WORKSPACE</div>
+          <h1>脚本管理</h1>
+          <p>集中管理 JMeter 脚本、主文件与上传入口，日常维护、编辑和执行都从这里开始。</p>
+        </div>
+        <div class="workspace-hero-pills">
+          <span class="workspace-pill">脚本 {{ stats.totalScripts }}</span>
+          <span class="workspace-pill">运行中 {{ stats.runningCount }}</span>
+          <span class="workspace-pill">记录 {{ stats.executionCount }}</span>
+        </div>
+      </div>
+    </section>
+
     <!-- 统计概览卡片 -->
     <div class="stats-overview">
       <div class="stat-card" v-loading="statsLoading">
-        <div class="stat-label">总脚本数</div>
-        <div class="stat-value">{{ stats.totalScripts }}</div>
+        <div class="stat-top">
+          <div class="stat-icon total">
+            <el-icon><Document /></el-icon>
+          </div>
+          <div class="stat-copy">
+            <div class="stat-label">总脚本数</div>
+            <div class="stat-value">{{ stats.totalScripts }}</div>
+          </div>
+        </div>
+        <div class="stat-meta">主脚本与待维护脚本统一管理</div>
       </div>
       <div class="stat-card" v-loading="statsLoading">
-        <div class="stat-label">总文件数</div>
-        <div class="stat-value">{{ stats.totalFiles }}</div>
+        <div class="stat-top">
+          <div class="stat-icon files">
+            <el-icon><Upload /></el-icon>
+          </div>
+          <div class="stat-copy">
+            <div class="stat-label">总文件数</div>
+            <div class="stat-value">{{ stats.totalFiles }}</div>
+          </div>
+        </div>
+        <div class="stat-meta">主文件上传后在这里进入主流程</div>
       </div>
       <div class="stat-card" v-loading="statsLoading">
-        <div class="stat-label">运行中</div>
-        <div class="stat-value">{{ stats.runningCount }}</div>
+        <div class="stat-top">
+          <div class="stat-icon running">
+            <el-icon><VideoPlay /></el-icon>
+          </div>
+          <div class="stat-copy">
+            <div class="stat-label">运行中</div>
+            <div class="stat-value">{{ stats.runningCount }}</div>
+          </div>
+        </div>
+        <div class="stat-meta">可直接跳转执行记录追踪状态</div>
       </div>
       <div class="stat-card" v-loading="statsLoading">
-        <div class="stat-label">执行记录数</div>
-        <div class="stat-value">{{ stats.executionCount }}</div>
+        <div class="stat-top">
+          <div class="stat-icon records">
+            <el-icon><Refresh /></el-icon>
+          </div>
+          <div class="stat-copy">
+            <div class="stat-label">执行记录数</div>
+            <div class="stat-value">{{ stats.executionCount }}</div>
+          </div>
+        </div>
+        <div class="stat-meta">历史回放、结果分析与基准对比入口</div>
       </div>
     </div>
 
@@ -92,6 +139,8 @@
             v-model="searchKeyword"
             placeholder="搜索脚本名称..."
             clearable
+            aria-label="搜索脚本名称"
+            @clear="handleSearch"
             @keyup.enter="handleSearch"
             class="search-input"
           >
@@ -106,13 +155,20 @@
         </div>
       </div>
 
+      <div class="list-utility-bar">
+        <span class="utility-chip">共 {{ total }} 条脚本</span>
+        <span class="utility-chip">主文件上传后可直接执行</span>
+        <span class="utility-chip">依赖文件在编辑页关联</span>
+      </div>
+
       <!-- 脚本表格 -->
-      <el-table
-        v-loading="loading"
-        :data="scriptList"
-        class="scripts-table"
-        stripe
-      >
+      <div class="table-shell">
+        <el-table
+          v-loading="loading"
+          :data="scriptList"
+          class="scripts-table"
+          stripe
+        >
         <el-table-column label="脚本名称" min-width="180" sortable prop="name" show-overflow-tooltip>
           <template #default="{ row }">
             <div class="script-name-cell">
@@ -166,7 +222,7 @@
               <el-button
                 link
                 type="success"
-                @click="openExecuteDialog(row)"
+                @click="handleExecute(row)"
                 class="action-btn execute-btn"
               >
                 <el-icon><video-play /></el-icon>
@@ -186,7 +242,8 @@
             </div>
           </template>
         </el-table-column>
-      </el-table>
+        </el-table>
+      </div>
 
       <!-- 空状态 -->
       <div v-if="!loading && scriptList.length === 0" class="empty-state">
@@ -210,15 +267,6 @@
         />
       </div>
     </div>
-
-    <!-- 执行弹窗 -->
-    <ExecuteDialog
-      v-if="executeDialogVisible"
-      v-model:visible="executeDialogVisible"
-      :script-id="currentScriptId"
-      :script-name="currentScriptName"
-      @success="fetchScriptList"
-    />
 
     <!-- 使用指南弹窗 -->
     <el-dialog
@@ -267,7 +315,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, reactive, defineAsyncComponent } from 'vue'
+import { ref, onMounted, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -286,8 +334,6 @@ import { scriptApi } from '@/api/script'
 import { executionApi } from '@/api/execution'
 import FileUpload from '@/components/FileUpload.vue'
 import { formatDateTimeInShanghai } from '@/utils/datetime'
-
-const ExecuteDialog = defineAsyncComponent(() => import('@/components/ExecuteDialog.vue'))
 
 const router = useRouter()
 
@@ -341,11 +387,6 @@ const uploadRules = {
     }
   ]
 }
-
-// 执行弹窗
-const executeDialogVisible = ref(false)
-const currentScriptId = ref(null)
-const currentScriptName = ref('')
 
 // 使用指南弹窗
 const showGuide = ref(false)
@@ -484,11 +525,9 @@ const handleDelete = async (row) => {
   }
 }
 
-// 打开执行弹窗
-const openExecuteDialog = (row) => {
-  currentScriptId.value = row.id
-  currentScriptName.value = row.name
-  executeDialogVisible.value = true
+// 执行
+const handleExecute = (row) => {
+  router.push(`/scripts/${row.id}/execute`)
 }
 
 // 格式化日期
@@ -504,44 +543,168 @@ onMounted(() => {
 
 <style scoped lang="scss">
 .script-list-page {
-  padding: 16px;
+  padding: 6px 0 14px;
 }
 
-// 统计概览卡片 - 小号指标条
+.workspace-hero {
+  margin-bottom: 12px;
+  padding: 16px 18px;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 32%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015)),
+    var(--bg-panel);
+  box-shadow: 0 22px 48px rgba(2, 8, 23, 0.12);
+}
+
+.workspace-hero-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.workspace-copy {
+  min-width: 0;
+
+  h1 {
+    margin: 6px 0 8px;
+    color: var(--text-primary);
+    font-size: 24px;
+    line-height: 1.15;
+  }
+
+  p {
+    max-width: 720px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+}
+
+.workspace-kicker {
+  color: var(--accent-blue);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.workspace-hero-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.workspace-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .stats-overview {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 10px;
   margin-bottom: 12px;
 
   .stat-card {
-    background: var(--bg-card);
-    border-radius: var(--radius-md);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    padding: 10px 12px;
+    min-height: 86px;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015)),
+      var(--bg-card-elevated);
+    border-radius: var(--radius-lg);
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    padding: 13px 14px;
+    box-shadow: 0 18px 40px rgba(2, 8, 23, 0.14);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 12px;
+
+    .stat-top {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .stat-icon {
+      width: 40px;
+      height: 40px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 14px;
+      font-size: 18px;
+
+      &.total {
+        background: rgba(56, 189, 248, 0.12);
+        color: var(--accent-blue);
+      }
+
+      &.files {
+        background: rgba(96, 165, 250, 0.12);
+        color: #60a5fa;
+      }
+
+      &.running {
+        background: rgba(74, 222, 128, 0.12);
+        color: var(--accent-green);
+      }
+
+      &.records {
+        background: rgba(167, 139, 250, 0.12);
+        color: #a78bfa;
+      }
+    }
+
+    .stat-copy {
+      min-width: 0;
+      flex: 1;
+    }
 
     .stat-label {
       color: var(--text-secondary);
       font-size: 11px;
-      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
     }
 
     .stat-value {
       color: var(--text-primary);
-      font-size: 18px;
+      font-size: 24px;
       font-weight: 700;
-      line-height: 1;
+      line-height: 1.1;
+      font-family: 'Consolas', 'Monaco', monospace;
+    }
+
+    .stat-meta {
+      color: var(--text-secondary);
+      font-size: 11px;
+      line-height: 1.4;
     }
   }
 }
 
 // 区域卡片
 .section-card {
-  background: var(--bg-card);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015)),
+    var(--bg-panel);
   border-radius: var(--radius-lg);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  padding: 14px;
-  margin-bottom: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  padding: 16px;
+  margin-bottom: 12px;
+  box-shadow: 0 22px 48px rgba(2, 8, 23, 0.12);
 }
 
 // 区域标签
@@ -556,15 +719,15 @@ onMounted(() => {
 
 .section-title {
   color: var(--text-primary);
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 600;
-  margin-bottom: 2px;
+  margin-bottom: 4px;
 }
 
 .section-desc {
   color: var(--text-secondary);
   font-size: 12px;
-  margin-bottom: 12px;
+  line-height: 1.6;
 }
 
 .section-header-with-action {
@@ -612,9 +775,30 @@ onMounted(() => {
   }
 }
 
+.list-utility-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.utility-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 // 上传区域 - 顶部工作台
 .upload-section {
-  padding: 16px 18px;
+  padding: 13px 14px;
   background:
     linear-gradient(180deg, rgba(0, 102, 255, 0.06) 0%, rgba(0, 102, 255, 0) 42%),
     var(--bg-card);
@@ -622,7 +806,7 @@ onMounted(() => {
   .upload-layout {
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: 10px;
   }
 
   .upload-panel-copy {
@@ -656,15 +840,15 @@ onMounted(() => {
   }
 
   .upload-desc-row {
-    margin-bottom: 12px;
+    margin-bottom: 10px;
   }
 
   .upload-file-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    gap: 12px;
+    gap: 8px;
     align-items: end;
-    padding: 14px;
+    padding: 10px;
     border-radius: 16px;
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid rgba(255, 255, 255, 0.06);
@@ -696,11 +880,11 @@ onMounted(() => {
 
   .upload-submit-btn {
     border-radius: 14px;
-    min-width: 188px;
-    min-height: 42px;
-    padding: 10px 20px;
+    min-width: 168px;
+    min-height: 36px;
+    padding: 8px 18px;
     font-weight: 600;
-    font-size: 14px;
+    font-size: 13px;
     box-shadow: 0 10px 24px rgba(0, 102, 255, 0.18);
 
     .btn-icon {
@@ -711,18 +895,33 @@ onMounted(() => {
 
 // 脚本列表区域
 .scripts-section {
+  .table-shell {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 6px;
+    border-radius: 16px;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.01)),
+      rgba(15, 23, 42, 0.52);
+    border: 1px solid rgba(148, 163, 184, 0.08);
+  }
+
   .scripts-table {
     background: transparent;
     border-radius: var(--radius-lg);
     overflow: hidden;
+    min-width: 1080px;
+    border: none;
 
     :deep(.el-table__header-wrapper) {
       th.el-table__cell {
-        background-color: rgba(255, 255, 255, 0.03) !important;
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018)) !important;
         color: var(--text-secondary) !important;
         font-weight: 500 !important;
         font-size: 13px !important;
         border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
+        height: 50px;
       }
     }
 
@@ -732,6 +931,8 @@ onMounted(() => {
       td.el-table__cell {
         border-bottom: 1px solid rgba(255, 255, 255, 0.04) !important;
         color: var(--text-primary) !important;
+        padding-top: 11px;
+        padding-bottom: 11px;
       }
     }
 
@@ -739,7 +940,8 @@ onMounted(() => {
       background-color: var(--bg-card);
 
       &:hover {
-        background-color: rgba(255, 255, 255, 0.02) !important;
+        background:
+          linear-gradient(90deg, rgba(56, 189, 248, 0.03), rgba(255, 255, 255, 0.015)) !important;
       }
     }
 
@@ -785,24 +987,33 @@ onMounted(() => {
       align-items: center;
       flex-wrap: nowrap;
       gap: 4px;
+      padding: 4px 6px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.025);
+      border: 1px solid rgba(255, 255, 255, 0.05);
 
       :deep(.el-button + .el-button) {
         margin-left: 0;
       }
 
       .action-btn {
-        padding: 4px 6px;
-        font-size: 13px;
+        padding: 6px 10px;
+        font-size: 12px;
         white-space: nowrap;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.045);
+        border: 1px solid rgba(255, 255, 255, 0.06);
 
         .el-icon {
           margin-right: 4px;
-          font-size: 14px;
+          font-size: 13px;
         }
       }
 
       .edit-btn {
         color: var(--accent-blue);
+        background: rgba(56, 189, 248, 0.08);
+        border-color: rgba(56, 189, 248, 0.14);
       }
 
       .download-btn {
@@ -811,10 +1022,14 @@ onMounted(() => {
 
       .execute-btn {
         color: var(--accent-green);
+        background: rgba(74, 222, 128, 0.08);
+        border-color: rgba(74, 222, 128, 0.14);
       }
 
       .delete-btn {
         color: var(--accent-red) !important;
+        background: rgba(248, 113, 113, 0.08);
+        border-color: rgba(248, 113, 113, 0.14);
       }
       
       .delete-btn:hover {
@@ -830,37 +1045,37 @@ onMounted(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 60px 20px;
+  padding: 40px 16px;
   background: var(--bg-secondary);
   border-radius: var(--radius-lg);
-  margin-top: 20px;
+  margin-top: 14px;
 
   .empty-icon {
-    width: 80px;
-    height: 80px;
+    width: 68px;
+    height: 68px;
     border-radius: 50%;
     background: linear-gradient(135deg, rgba(0, 212, 255, 0.1), rgba(0, 102, 255, 0.1));
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-bottom: 16px;
+    margin-bottom: 12px;
 
     .el-icon {
-      font-size: 40px;
+      font-size: 34px;
       color: var(--accent-blue);
       opacity: 0.6;
     }
   }
 
   .empty-title {
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 500;
     color: var(--text-primary);
     margin-bottom: 8px;
   }
 
   .empty-desc {
-    font-size: 14px;
+    font-size: 13px;
     color: var(--text-secondary);
   }
 }
@@ -869,13 +1084,21 @@ onMounted(() => {
 .pagination-wrapper {
   display: flex;
   justify-content: center;
-  margin-top: 24px;
+  margin-top: 18px;
 }
 
 // 响应式
 @media (max-width: 1200px) {
   .stats-overview {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .workspace-hero-main {
+    flex-direction: column;
+  }
+
+  .workspace-hero-pills {
+    justify-content: flex-start;
   }
 
   .upload-section {
@@ -892,6 +1115,14 @@ onMounted(() => {
 @media (max-width: 768px) {
   .stats-overview {
     grid-template-columns: 1fr;
+  }
+
+  .workspace-hero {
+    padding: 18px;
+  }
+
+  .workspace-copy h1 {
+    font-size: 24px;
   }
 
   .section-header-with-action {

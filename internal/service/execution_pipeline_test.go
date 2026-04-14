@@ -9,6 +9,7 @@ import (
 
 	"jmeter-admin/config"
 	"jmeter-admin/internal/database"
+	"jmeter-admin/internal/model"
 )
 
 func TestBuildExecutionRunPlan(t *testing.T) {
@@ -184,6 +185,44 @@ func TestExtractCSVDataSetReferences(t *testing.T) {
 	}
 	if refs[1].Filename != "dict/areas.csv" || refs[1].IgnoreFirst {
 		t.Fatalf("unexpected second ref: %+v", refs[1])
+	}
+}
+
+func TestBuildScriptPreflightReport(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "demo.jmx")
+	content := strings.Join([]string{
+		`<jmeterTestPlan>`,
+		`<ThreadGroup testclass="ThreadGroup">`,
+		`<stringProp name="ThreadGroup.num_threads">20</stringProp>`,
+		`</ThreadGroup>`,
+		`<TransactionController testclass="TransactionController"></TransactionController>`,
+		`<CSVDataSet testclass="CSVDataSet"><stringProp name="filename">data/users.csv</stringProp></CSVDataSet>`,
+		`<HTTPSamplerProxy testclass="HTTPSamplerProxy"></HTTPSamplerProxy>`,
+		`<ResponseAssertion testclass="ResponseAssertion"></ResponseAssertion>`,
+		`</jmeterTestPlan>`,
+	}, "")
+
+	if err := os.WriteFile(scriptPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write jmx: %v", err)
+	}
+
+	scan := inspectJMXDependencies(scriptPath, []string{"users.csv"}, true, true)
+	report := buildScriptPreflightReport(scriptPath, scan, true, true)
+	if report == nil {
+		t.Fatalf("expected preflight report")
+	}
+	if report.MetricMode != "TPS（事务/s）" {
+		t.Fatalf("expected TPS metric mode, got %q", report.MetricMode)
+	}
+	if report.Level != "success" {
+		t.Fatalf("expected success level, got %q", report.Level)
+	}
+	if report.Score <= 0 {
+		t.Fatalf("expected positive score, got %d", report.Score)
+	}
+	if len(report.Facts) == 0 {
+		t.Fatalf("expected facts in preflight report")
 	}
 }
 
@@ -422,6 +461,15 @@ func TestGetExecutionErrorsCreatesAndUsesIndex(t *testing.T) {
 	if analysis.TotalErrors != 1 || analysis.ErrorRate != 100 {
 		t.Fatalf("unexpected analysis: %+v", analysis)
 	}
+	if len(analysis.CategoryDistribution) == 0 {
+		t.Fatalf("expected category distribution in analysis")
+	}
+	if len(analysis.APIDistribution) == 0 {
+		t.Fatalf("expected api distribution in analysis")
+	}
+	if len(analysis.ReportHighlights) == 0 {
+		t.Fatalf("expected report highlights in analysis")
+	}
 
 	indexPath := errorAnalysisIndexPath(resultPath)
 	if _, err := os.Stat(indexPath); err != nil {
@@ -438,5 +486,24 @@ func TestGetExecutionErrorsCreatesAndUsesIndex(t *testing.T) {
 	}
 	if analysis2.TotalErrors != 1 || len(analysis2.Records) != 1 {
 		t.Fatalf("unexpected indexed analysis: %+v", analysis2)
+	}
+
+	overview, err := GetExecutionErrorOverview(1)
+	if err != nil {
+		t.Fatalf("GetExecutionErrorOverview failed: %v", err)
+	}
+	if overview.TotalErrors != 1 || len(overview.ErrorTypes) != 1 {
+		t.Fatalf("unexpected overview: %+v", overview)
+	}
+
+	report := BuildExecutionErrorReportMarkdown(&model.Execution{
+		ID:         1,
+		ScriptName: "demo",
+		Status:     "failed",
+		StartTime:  now,
+		EndTime:    now,
+	}, analysis2)
+	if !strings.Contains(report, "错误分类聚类") {
+		t.Fatalf("expected markdown report to include category section, got %s", report)
 	}
 }

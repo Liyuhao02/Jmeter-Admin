@@ -64,6 +64,12 @@ export const executionApi = {
     this.triggerDownload(url)
   },
 
+  // 下载错误报告（Markdown）
+  downloadErrorReport(id) {
+    const url = `/api/executions/${id}/download/error-report`
+    this.triggerDownload(url)
+  },
+
   // 下载完整结果（ZIP）
   downloadAll(id) {
     const url = `/api/executions/${id}/download/all`

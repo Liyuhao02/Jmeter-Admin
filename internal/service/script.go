@@ -166,6 +166,7 @@ func InspectScriptDependencies(id int64, distributed bool, splitCSV bool) (*mode
 		AttachedFiles:       scan.AttachedFiles,
 		MissingDependencies: scan.MissingDependencies,
 		Warnings:            scan.Warnings,
+		Preflight:           buildScriptPreflightReport(script.FilePath, scan, distributed, splitCSV),
 	}
 	return report, nil
 }

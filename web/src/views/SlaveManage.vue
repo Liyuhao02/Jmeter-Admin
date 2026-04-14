@@ -1,5 +1,20 @@
 <template>
   <div class="slave-page">
+    <section class="workspace-hero">
+      <div class="workspace-hero-main">
+        <div class="workspace-copy">
+          <div class="workspace-kicker">WORKSPACE</div>
+          <h1>Slave 管理</h1>
+          <p>统一维护 Master 回调地址、节点在线状态和资源健康度，让分布式执行的链路在开始前就清清楚楚。</p>
+        </div>
+        <div class="workspace-hero-pills">
+          <span class="workspace-pill">在线 {{ onlineSlaveCount }} / {{ slaveList.length }}</span>
+          <span class="workspace-pill">Agent 在线 {{ agentOnlineCount }}</span>
+          <span class="workspace-pill">高负载 {{ busySlaveCount }}</span>
+        </div>
+      </div>
+    </section>
+
     <!-- Master 节点配置卡片 -->
     <div class="master-config-card">
       <div class="master-config-header">
@@ -43,6 +58,29 @@
         </div>
       </div>
 
+      <div class="master-overview-grid">
+        <div class="master-overview-card is-callback">
+          <span class="overview-card-label">Master 回调基地址</span>
+          <code class="overview-card-code">{{ masterCallbackBaseURL || '未配置' }}</code>
+        </div>
+        <div class="master-overview-card">
+          <span class="overview-card-label">在线节点</span>
+          <strong class="overview-card-value">{{ onlineSlaveCount }} / {{ slaveList.length }}</strong>
+        </div>
+        <div class="master-overview-card">
+          <span class="overview-card-label">Agent 在线</span>
+          <strong class="overview-card-value">{{ agentOnlineCount }}</strong>
+        </div>
+        <div class="master-overview-card">
+          <span class="overview-card-label">平均 CPU</span>
+          <strong class="overview-card-value">{{ averageCpuText }}</strong>
+        </div>
+        <div class="master-overview-card">
+          <span class="overview-card-label">高负载节点</span>
+          <strong class="overview-card-value">{{ busySlaveCount }}</strong>
+        </div>
+      </div>
+
       <!-- 心跳状态指示 -->
       <div class="heartbeat-status-bar">
         <div class="heartbeat-indicator">
@@ -76,13 +114,20 @@
         </div>
       </div>
 
+      <div class="list-utility-bar">
+        <span class="utility-chip">共 {{ slaveList.length }} 个节点</span>
+        <span class="utility-chip">在线 {{ onlineSlaveCount }} 个</span>
+        <span class="utility-chip">每 30 秒自动检测一次</span>
+      </div>
+
       <!-- 节点表格 -->
-      <el-table
-        v-loading="loading"
-        :data="slaveList"
-        class="slaves-table"
-        stripe
-      >
+      <div class="table-shell">
+        <el-table
+          v-loading="loading"
+          :data="slaveList"
+          class="slaves-table"
+          stripe
+        >
         <el-table-column label="名称" min-width="140" sortable prop="name" show-overflow-tooltip>
           <template #default="{ row }">
             <div class="node-name-cell">
@@ -184,6 +229,7 @@
                   type="primary"
                   @click="handleCheck(row)"
                   :loading="checkingId === row.id"
+                  :aria-label="`检测节点 ${row.name}`"
                   class="action-btn icon-btn"
                 >
                   <el-icon><CircleCheck /></el-icon>
@@ -197,7 +243,12 @@
                 popper-class="diagnostic-popover"
               >
                 <template #reference>
-                  <el-button link type="warning" class="action-btn icon-btn diagnostic-btn">
+                  <el-button
+                    link
+                    type="warning"
+                    class="action-btn icon-btn diagnostic-btn"
+                    :aria-label="`查看节点 ${row.name} 的连接诊断`"
+                  >
                     <el-icon><WarningFilled /></el-icon>
                   </el-button>
                 </template>
@@ -231,6 +282,7 @@
                   link
                   type="primary"
                   @click="handleEdit(row)"
+                  :aria-label="`编辑节点 ${row.name}`"
                   class="action-btn icon-btn edit-btn"
                 >
                   <el-icon><Edit /></el-icon>
@@ -241,6 +293,7 @@
                   link
                   type="danger"
                   @click="handleDelete(row)"
+                  :aria-label="`删除节点 ${row.name}`"
                   class="action-btn icon-btn delete-btn"
                 >
                   <el-icon><Delete /></el-icon>
@@ -252,6 +305,7 @@
                   type="info"
                   @click="showStatsDialog(row)"
                   :disabled="!row.parsedStats"
+                  :aria-label="`查看节点 ${row.name} 的资源详情`"
                   class="action-btn icon-btn stats-btn"
                 >
                   <el-icon><InfoFilled /></el-icon>
@@ -260,7 +314,8 @@
             </div>
           </template>
         </el-table-column>
-      </el-table>
+        </el-table>
+      </div>
 
       <!-- 空状态 -->
       <div v-if="!loading && slaveList.length === 0" class="empty-state">
@@ -410,7 +465,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { computed, ref, reactive, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Monitor, Edit, Delete, CircleCheck, Connection, InfoFilled, CircleCheckFilled, WarningFilled } from '@element-plus/icons-vue'
 import { slaveApi } from '@/api/slave'
@@ -561,6 +616,39 @@ const formatUptime = (seconds) => {
   }
   return h > 0 ? `${h}小时${m}分钟` : `${m}分钟`
 }
+
+const masterCallbackBaseURL = computed(() => {
+  if (!masterHostname.value || typeof window === 'undefined') return ''
+  try {
+    const baseURL = new URL(window.location.origin)
+    baseURL.hostname = masterHostname.value
+    return baseURL.origin
+  } catch {
+    return ''
+  }
+})
+
+const onlineSlaveCount = computed(() => slaveList.value.filter(item => item.status === 'online').length)
+
+const agentOnlineCount = computed(() => slaveList.value.filter(item => item.agent_status === 'online').length)
+
+const averageCpuText = computed(() => {
+  const values = slaveList.value
+    .map(item => Number(item.parsedStats?.cpu?.percent))
+    .filter(value => Number.isFinite(value))
+  if (!values.length) return '--'
+  const avg = values.reduce((sum, value) => sum + value, 0) / values.length
+  return `${avg.toFixed(0)}%`
+})
+
+const busySlaveCount = computed(() => {
+  return slaveList.value.filter(item => {
+    const stats = item.parsedStats || {}
+    return Number(stats.cpu?.percent || 0) >= 80
+      || Number(stats.memory?.percent || 0) >= 85
+      || Number(stats.disk?.percent || 0) >= 90
+  }).length
+})
 
 // 显示资源详情弹窗
 const showStatsDialog = (row) => {
@@ -866,16 +954,84 @@ onUnmounted(() => {
 
 <style scoped lang="scss">
 .slave-page {
-  padding: 20px;
+  padding: 6px 0 14px;
+}
+
+.workspace-hero {
+  margin-bottom: 12px;
+  padding: 16px 18px;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 32%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015)),
+    var(--bg-panel);
+  box-shadow: 0 22px 48px rgba(2, 8, 23, 0.12);
+}
+
+.workspace-hero-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.workspace-copy {
+  min-width: 0;
+
+  h1 {
+    margin: 6px 0 8px;
+    color: var(--text-primary);
+    font-size: 24px;
+    line-height: 1.15;
+  }
+
+  p {
+    max-width: 760px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+}
+
+.workspace-kicker {
+  color: var(--accent-blue);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.workspace-hero-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.workspace-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 // Master 配置卡片
 .master-config-card {
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  padding: 20px 24px;
-  margin-bottom: 20px;
+  background:
+    linear-gradient(180deg, rgba(56, 189, 248, 0.05), rgba(255, 255, 255, 0.015)),
+    var(--bg-panel);
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  padding: 16px 18px;
+  margin-bottom: 12px;
+  box-shadow: 0 20px 44px rgba(2, 8, 23, 0.14);
 
   .heartbeat-status-bar {
     display: flex;
@@ -934,7 +1090,7 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 16px;
+    margin-bottom: 12px;
 
     .master-config-title {
       display: flex;
@@ -965,7 +1121,7 @@ onUnmounted(() => {
   .master-config-body {
     display: flex;
     align-items: center;
-    gap: 24px;
+    gap: 18px;
     flex-wrap: wrap;
 
     .config-item {
@@ -1016,14 +1172,66 @@ onUnmounted(() => {
       }
     }
   }
+
+  .master-overview-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.8fr) repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+  }
+
+  .master-overview-card {
+    min-height: 74px;
+    padding: 12px 14px;
+    border-radius: 16px;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.012)),
+      rgba(15, 23, 42, 0.62);
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 8px;
+
+    &.is-callback {
+      background:
+        radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 42%),
+        rgba(15, 23, 42, 0.62);
+    }
+
+    .overview-card-label {
+      color: var(--text-secondary);
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .overview-card-value {
+      color: var(--text-primary);
+      font-size: 21px;
+      font-weight: 700;
+      font-family: 'Consolas', 'Monaco', monospace;
+    }
+
+    .overview-card-code {
+      color: var(--text-primary);
+      font-size: 13px;
+      line-height: 1.6;
+      word-break: break-all;
+    }
+  }
 }
 
 // 区域卡片
 .section-card {
-  background: var(--bg-card);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015)),
+    var(--bg-panel);
   border-radius: var(--radius-lg);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  padding: 24px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  padding: 16px;
+  margin-bottom: 12px;
+  box-shadow: 0 22px 48px rgba(2, 8, 23, 0.12);
 }
 
 // 区域标签
@@ -1038,31 +1246,36 @@ onUnmounted(() => {
 
 .section-title {
   color: var(--text-primary);
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
   margin-bottom: 4px;
 }
 
 .section-desc {
   color: var(--text-secondary);
-  font-size: 14px;
-  margin-bottom: 16px;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .section-header-with-action {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 20px;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
 
   .section-header {
     flex: 1;
+    min-width: 0;
   }
 
   .section-actions {
     display: flex;
     gap: 12px;
     align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
 
     .btn-icon {
       margin-right: 6px;
@@ -1070,19 +1283,55 @@ onUnmounted(() => {
   }
 }
 
+.list-utility-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.utility-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 // 节点表格
+.table-shell {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px;
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.01)),
+    rgba(15, 23, 42, 0.52);
+  border: 1px solid rgba(148, 163, 184, 0.08);
+}
+
 .slaves-table {
   background: transparent;
   border-radius: var(--radius-lg);
   overflow: hidden;
+  min-width: 1120px;
+  border: none;
 
   :deep(.el-table__header-wrapper) {
     th.el-table__cell {
-      background-color: rgba(255, 255, 255, 0.03) !important;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018)) !important;
       color: var(--text-secondary) !important;
       font-weight: 500 !important;
       font-size: 13px !important;
       border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
+      height: 50px;
     }
   }
 
@@ -1092,6 +1341,8 @@ onUnmounted(() => {
     td.el-table__cell {
       border-bottom: 1px solid rgba(255, 255, 255, 0.04) !important;
       color: var(--text-primary) !important;
+      padding-top: 11px;
+      padding-bottom: 11px;
     }
   }
 
@@ -1099,7 +1350,8 @@ onUnmounted(() => {
     background-color: var(--bg-card);
 
     &:hover {
-      background-color: rgba(255, 255, 255, 0.02) !important;
+      background:
+        linear-gradient(90deg, rgba(56, 189, 248, 0.03), rgba(255, 255, 255, 0.015)) !important;
     }
   }
 
@@ -1285,26 +1537,41 @@ onUnmounted(() => {
     font-size: 13px;
   }
 
-  .action-btns {
+.action-btns {
     display: flex;
-    gap: 2px;
+    gap: 4px;
     flex-wrap: nowrap;
-    overflow: hidden;
+    overflow: visible;
     justify-content: flex-start;
+    padding: 4px 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.05);
 
     .action-btn {
-      padding: 4px 6px;
+      padding: 0;
       font-size: 13px;
+      min-width: auto;
+      border-radius: 999px;
 
       .el-icon {
-        font-size: 16px;
+        font-size: 14px;
       }
 
       &.icon-btn {
-        padding: 6px;
+        width: 30px;
+        height: 30px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.045);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        transition: transform 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
 
         .el-icon {
           margin-right: 0;
+        }
+
+        &:hover {
+          transform: translateY(-1px);
         }
       }
     }
@@ -1314,8 +1581,17 @@ onUnmounted(() => {
       color: var(--accent-blue);
     }
 
+    .check-btn,
+    .edit-btn,
+    .stats-btn {
+      background: rgba(56, 189, 248, 0.06);
+      border-color: rgba(56, 189, 248, 0.12);
+    }
+
     .delete-btn {
       color: var(--accent-red) !important;
+      background: rgba(248, 113, 113, 0.06);
+      border-color: rgba(248, 113, 113, 0.12);
     }
 
     .delete-btn:hover {
@@ -1367,37 +1643,37 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 60px 20px;
+  padding: 40px 16px;
   background: var(--bg-secondary);
   border-radius: var(--radius-lg);
-  margin-top: 20px;
+  margin-top: 14px;
 
   .empty-icon {
-    width: 80px;
-    height: 80px;
+    width: 68px;
+    height: 68px;
     border-radius: 50%;
     background: linear-gradient(135deg, rgba(0, 212, 255, 0.1), rgba(0, 102, 255, 0.1));
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-bottom: 16px;
+    margin-bottom: 12px;
 
     .el-icon {
-      font-size: 40px;
+      font-size: 34px;
       color: var(--accent-blue);
       opacity: 0.6;
     }
   }
 
   .empty-title {
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 500;
     color: var(--text-primary);
     margin-bottom: 8px;
   }
 
   .empty-desc {
-    font-size: 14px;
+    font-size: 13px;
     color: var(--text-secondary);
   }
 }
@@ -1450,6 +1726,50 @@ onUnmounted(() => {
 // 诊断按钮
 .diagnostic-btn {
   color: var(--accent-orange) !important;
+}
+
+@media (max-width: 1280px) {
+  .workspace-hero-main {
+    flex-direction: column;
+  }
+
+  .workspace-hero-pills {
+    justify-content: flex-start;
+  }
+
+  .master-config-card {
+    .master-overview-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+}
+
+@media (max-width: 768px) {
+  .workspace-hero {
+    padding: 18px;
+  }
+
+  .workspace-copy h1 {
+    font-size: 24px;
+  }
+
+  .master-config-card {
+    .master-config-body {
+      gap: 16px;
+
+      .config-item {
+        min-width: 100%;
+      }
+    }
+
+    .master-overview-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .section-card {
+    padding: 18px;
+  }
 }
 
 // 诊断面板样式

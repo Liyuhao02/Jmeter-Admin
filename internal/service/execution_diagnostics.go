@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
+	"jmeter-admin/config"
 	"jmeter-admin/internal/database"
 	"jmeter-admin/internal/model"
 )
@@ -21,6 +23,19 @@ type scriptDependencyScan struct {
 	AttachedFiles       []string
 	MissingDependencies []string
 	Warnings            []string
+}
+
+type scriptStructureStats struct {
+	ThreadGroups           int
+	EstimatedThreads       int
+	HTTPSamplers           int
+	TransactionControllers int
+	CSVDataSets            int
+	Assertions             int
+	Timers                 int
+	JSR223Elements         int
+	CriticalSections       int
+	PluginComponents       int
 }
 
 func parseExecutionSummaryMap(summaryData string) map[string]interface{} {
@@ -179,6 +194,242 @@ func dedupeStrings(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func countJMXPattern(content string, patterns ...string) int {
+	count := 0
+	for _, pattern := range patterns {
+		count += strings.Count(content, pattern)
+	}
+	return count
+}
+
+func extractEstimatedThreads(content string) int {
+	matches := regexp.MustCompile(`<stringProp name="ThreadGroup\.num_threads">(\d+)</stringProp>`).FindAllStringSubmatch(content, -1)
+	total := 0
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		value, err := strconv.Atoi(match[1])
+		if err != nil || value <= 0 {
+			continue
+		}
+		total += value
+	}
+	return total
+}
+
+func analyzeJMXStructure(content string) scriptStructureStats {
+	stats := scriptStructureStats{
+		ThreadGroups: countJMXPattern(
+			content,
+			`testclass="ThreadGroup"`,
+			`testclass="SetupThreadGroup"`,
+			`testclass="PostThreadGroup"`,
+			`testclass="UltimateThreadGroup"`,
+			`testclass="ConcurrencyThreadGroup"`,
+			`testclass="ArrivalsThreadGroup"`,
+		),
+		HTTPSamplers:           countJMXPattern(content, `testclass="HTTPSamplerProxy"`),
+		TransactionControllers: countJMXPattern(content, `testclass="TransactionController"`),
+		CSVDataSets:            countJMXPattern(content, `testclass="CSVDataSet"`),
+		Assertions: countJMXPattern(
+			content,
+			`testclass="ResponseAssertion"`,
+			`testclass="DurationAssertion"`,
+			`testclass="SizeAssertion"`,
+			`testclass="JSONPathAssertion"`,
+			`testclass="XPathAssertion"`,
+			`testclass="XMLAssertion"`,
+			`testclass="HTMLAssertion"`,
+			`testclass="MD5HexAssertion"`,
+			`testclass="JSR223Assertion"`,
+		),
+		Timers: countJMXPattern(
+			content,
+			`testclass="ConstantTimer"`,
+			`testclass="UniformRandomTimer"`,
+			`testclass="GaussianRandomTimer"`,
+			`testclass="PoissonRandomTimer"`,
+			`testclass="PreciseThroughputTimer"`,
+			`testclass="ConstantThroughputTimer"`,
+			`testclass="SynchronizingTimer"`,
+			`testclass="BeanShellTimer"`,
+			`testclass="JSR223Timer"`,
+		),
+		JSR223Elements: countJMXPattern(
+			content,
+			`testclass="JSR223Sampler"`,
+			`testclass="JSR223PreProcessor"`,
+			`testclass="JSR223PostProcessor"`,
+			`testclass="JSR223Assertion"`,
+			`testclass="JSR223Listener"`,
+		),
+		CriticalSections: countJMXPattern(content, `testclass="CriticalSectionController"`),
+		PluginComponents: countJMXPattern(content, `kg.apc.`, `jp@gc`, `UltimateThreadGroup`, `ConcurrencyThreadGroup`, `ArrivalsThreadGroup`),
+	}
+	stats.EstimatedThreads = extractEstimatedThreads(content)
+	return stats
+}
+
+func appendRecommendation(items []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return items
+	}
+	for _, item := range items {
+		if item == value {
+			return items
+		}
+	}
+	return append(items, value)
+}
+
+func buildScriptPreflightReport(scriptPath string, scan scriptDependencyScan, distributed bool, splitCSV bool) *model.ScriptPreflightReport {
+	if strings.TrimSpace(scriptPath) == "" {
+		return nil
+	}
+
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return &model.ScriptPreflightReport{
+			Score:      0,
+			Level:      "danger",
+			Summary:    "无法读取脚本主文件，当前无法完成执行前体检。",
+			MetricMode: "未知",
+			MetricUnit: "-",
+			Recommendations: []string{
+				"先确认脚本主文件仍然存在且当前服务进程有读取权限。",
+			},
+		}
+	}
+
+	stats := analyzeJMXStructure(string(content))
+	metricMode := "请求次数（次/秒）"
+	metricUnit := "req/s"
+	if stats.TransactionControllers > 0 {
+		metricMode = "TPS（事务/s）"
+		metricUnit = "tps"
+	}
+
+	score := 100
+	if stats.ThreadGroups == 0 {
+		score -= 25
+	}
+	if stats.HTTPSamplers == 0 {
+		score -= 25
+	}
+	if len(scan.MissingDependencies) > 0 {
+		score -= 35
+	}
+	if distributed && len(scan.CSVFiles) > 0 && !splitCSV {
+		score -= 12
+	}
+	if stats.TransactionControllers == 0 {
+		score -= 8
+	}
+	if stats.CriticalSections > 0 {
+		score -= 10
+	}
+	if distributed && len(scan.PluginDependencies) > 0 {
+		score -= 8
+	}
+	if len(scan.Warnings) > 0 {
+		warningPenalty := len(scan.Warnings) * 2
+		if warningPenalty > 12 {
+			warningPenalty = 12
+		}
+		score -= warningPenalty
+	}
+	if score < 0 {
+		score = 0
+	}
+
+	level := "success"
+	switch {
+	case len(scan.MissingDependencies) > 0 || stats.ThreadGroups == 0 || stats.HTTPSamplers == 0:
+		level = "danger"
+	case stats.TransactionControllers == 0 || stats.CriticalSections > 0 || (distributed && len(scan.CSVFiles) > 0 && !splitCSV) || len(scan.PluginDependencies) > 0:
+		level = "warning"
+	}
+
+	highlights := []string{
+		fmt.Sprintf("检测到 %d 个线程组、%d 个 HTTP 采样器、%d 个事务控制器。", stats.ThreadGroups, stats.HTTPSamplers, stats.TransactionControllers),
+		fmt.Sprintf("当前主指标将按 %s 展示。", metricMode),
+	}
+	if stats.EstimatedThreads > 0 {
+		highlights = append(highlights, fmt.Sprintf("按标准线程组估算，本轮并发规模约 %d。", stats.EstimatedThreads))
+	}
+	if stats.CSVDataSets > 0 {
+		highlights = append(highlights, fmt.Sprintf("脚本引用 %d 个 CSV 数据源。", stats.CSVDataSets))
+	}
+	if len(scan.PluginDependencies) > 0 {
+		highlights = append(highlights, fmt.Sprintf("检测到插件组件：%s。", strings.Join(scan.PluginDependencies, "、")))
+	}
+
+	recommendations := make([]string, 0, 6)
+	if stats.ThreadGroups == 0 {
+		recommendations = appendRecommendation(recommendations, "脚本中未识别出线程组，请确认 JMX 结构完整后再执行。")
+	}
+	if stats.HTTPSamplers == 0 {
+		recommendations = appendRecommendation(recommendations, "脚本中未检测到 HTTP 请求采样器，当前更像一个占位脚本而非压测脚本。")
+	}
+	if len(scan.MissingDependencies) > 0 {
+		recommendations = appendRecommendation(recommendations, fmt.Sprintf("先补齐缺失依赖：%s。", strings.Join(scan.MissingDependencies, "、")))
+	}
+	if stats.TransactionControllers == 0 {
+		recommendations = appendRecommendation(recommendations, "建议为关键业务流程补充事务控制器，否则平台只能按请求/s展示吞吐，而不是更稳定的事务 TPS。")
+	}
+	if distributed && len(scan.CSVFiles) > 0 && !splitCSV {
+		recommendations = appendRecommendation(recommendations, "分布式执行时建议开启 CSV 数据分片，避免多个节点重复消费同一批参数。")
+	}
+	if stats.CriticalSections > 0 {
+		recommendations = appendRecommendation(recommendations, "脚本中存在临界区控制器，建议优先确认锁粒度和释放逻辑，避免并发被串行化。")
+	}
+	if distributed && len(scan.PluginDependencies) > 0 {
+		recommendations = appendRecommendation(recommendations, "分布式执行前建议对齐 Master/Slave 的插件版本，否则节点行为可能不一致。")
+	}
+	if distributed && len(scan.FileDependencies) > 0 {
+		recommendations = appendRecommendation(recommendations, "脚本引用了本地文件，分布式执行前请再次确认这些文件已经随脚本一起关联上传。")
+	}
+
+	summary := "脚本基础体检通过。"
+	switch level {
+	case "danger":
+		summary = "当前脚本存在会直接影响执行成功率的高风险项，建议先修复再启动任务。"
+	case "warning":
+		summary = "脚本可以执行，但存在会影响口径一致性、并发真实性或分布式稳定性的风险。"
+	}
+
+	transactionTone := "warning"
+	if stats.TransactionControllers > 0 {
+		transactionTone = "green"
+	}
+	dependencyTone := "warning"
+	if len(scan.MissingDependencies) > 0 {
+		dependencyTone = "danger"
+	}
+
+	facts := []model.ScriptPreflightFact{
+		{Label: "健康分", Value: fmt.Sprintf("%d", score), Detail: summary, Tone: level},
+		{Label: "指标口径", Value: metricMode, Detail: fmt.Sprintf("图表主单位：%s", metricUnit), Tone: "blue"},
+		{Label: "线程组", Value: fmt.Sprintf("%d", stats.ThreadGroups), Detail: fmt.Sprintf("估算并发 %d", stats.EstimatedThreads), Tone: "blue"},
+		{Label: "HTTP 采样器", Value: fmt.Sprintf("%d", stats.HTTPSamplers), Detail: fmt.Sprintf("断言 %d / 定时器 %d", stats.Assertions, stats.Timers), Tone: "green"},
+		{Label: "事务控制器", Value: fmt.Sprintf("%d", stats.TransactionControllers), Detail: fmt.Sprintf("CSV %d / JSR223 %d", stats.CSVDataSets, stats.JSR223Elements), Tone: transactionTone},
+		{Label: "依赖风险", Value: fmt.Sprintf("缺失 %d", len(scan.MissingDependencies)), Detail: fmt.Sprintf("插件 %d / 临界区 %d", len(scan.PluginDependencies), stats.CriticalSections), Tone: dependencyTone},
+	}
+
+	return &model.ScriptPreflightReport{
+		Score:           score,
+		Level:           level,
+		Summary:         summary,
+		MetricMode:      metricMode,
+		MetricUnit:      metricUnit,
+		Highlights:      dedupeStrings(highlights),
+		Recommendations: recommendations,
+		Facts:           facts,
+	}
 }
 
 func getExecutionSlaveHosts(execution *model.Execution) []string {
@@ -414,6 +665,23 @@ func readDetailSourceName(path string) string {
 	return ""
 }
 
+func runtimeScriptsUseSplitCSV(runtimeScripts []model.ExecutionFileStatus) bool {
+	for _, item := range runtimeScripts {
+		if !item.Exists || strings.TrimSpace(item.Path) == "" {
+			continue
+		}
+		content, err := os.ReadFile(item.Path)
+		if err != nil {
+			continue
+		}
+		text := string(content)
+		if strings.Contains(text, "csv-data/") || strings.Contains(text, "csv-data\\") {
+			return true
+		}
+	}
+	return false
+}
+
 func buildExecutionDiagnostics(execution *model.Execution, summary map[string]interface{}) *model.ExecutionDiagnostics {
 	diagnostics := &model.ExecutionDiagnostics{}
 	if execution == nil || strings.TrimSpace(execution.ResultPath) == "" {
@@ -424,13 +692,14 @@ func buildExecutionDiagnostics(execution *model.Execution, summary map[string]in
 	slaveHosts := getExecutionSlaveHosts(execution)
 	localResultPath := filepath.Join(resultDir, "result-local.jtl")
 	remoteResultPath := filepath.Join(resultDir, "result-remote.jtl")
-	splitCSV := executionFileStatus("CSV 分片目录", filepath.Join(resultDir, "csv-data")).Exists
+	splitCSVRequested := execution.SplitCSV
+	splitCSV := splitCSVRequested || executionFileStatus("CSV 分片目录", filepath.Join(resultDir, "csv-data")).Exists
 
 	mode := "local"
-	includeMaster := false
+	includeMaster := execution.IncludeMaster
 	if len(slaveHosts) > 0 {
 		mode = "distributed"
-		includeMaster = executionFileStatus("本地结果", localResultPath).Exists || executionFileStatus("本地运行脚本", filepath.Join(resultDir, "runtime-local.jmx")).Exists || executionFileStatus("本地明细脚本", filepath.Join(resultDir, "runtime-local-with-details.jmx")).Exists
+		includeMaster = includeMaster || executionFileStatus("本地结果", localResultPath).Exists || executionFileStatus("本地运行脚本", filepath.Join(resultDir, "runtime-local.jmx")).Exists || executionFileStatus("本地明细脚本", filepath.Join(resultDir, "runtime-local-with-details.jmx")).Exists
 		if includeMaster {
 			mode = "distributed_with_master"
 		}
@@ -455,7 +724,7 @@ func buildExecutionDiagnostics(execution *model.Execution, summary map[string]in
 		executionFileStatus("远端明细脚本", filepath.Join(resultDir, "runtime-remote-with-details.jmx")),
 	}
 	runtimeScripts := make([]model.ExecutionFileStatus, 0, len(runtimeCandidates))
-	saveHTTPDetails := false
+	saveHTTPDetails := execution.SaveHTTPDetails
 	for _, item := range runtimeCandidates {
 		if item.Exists {
 			runtimeScripts = append(runtimeScripts, item)
@@ -463,6 +732,9 @@ func buildExecutionDiagnostics(execution *model.Execution, summary map[string]in
 				saveHTTPDetails = true
 			}
 		}
+	}
+	if !splitCSV && len(runtimeScripts) > 0 {
+		splitCSV = runtimeScriptsUseSplitCSV(runtimeScripts)
 	}
 
 	localDetailFile := executionFileStatus("本地错误明细", filepath.Join(resultDir, "error-details.ndjson"))
@@ -540,6 +812,7 @@ func buildExecutionDiagnostics(execution *model.Execution, summary map[string]in
 	scriptPath := getExecutionScriptPath(execution.ScriptID)
 	attachedFiles := getAttachedScriptFileNames(execution.ScriptID)
 	dependencyScan := inspectJMXDependencies(scriptPath, attachedFiles, len(slaveHosts) > 0, splitCSV)
+	preflightReport := buildScriptPreflightReport(scriptPath, dependencyScan, len(slaveHosts) > 0, splitCSV)
 
 	warnings := append([]string{}, dependencyScan.Warnings...)
 	if envSnapshot, err := loadExecutionEnvironmentSnapshot(resultDir); err == nil && envSnapshot != nil {
@@ -551,10 +824,25 @@ func buildExecutionDiagnostics(execution *model.Execution, summary map[string]in
 	if len(slaveHosts) > 0 && len(missingSources) > 0 && execution.Status != "running" {
 		warnings = append(warnings, "部分分布式节点未回传错误明细，错误分析可能并不完整。")
 	}
+	if splitCSVRequested && !splitCSV && len(dependencyScan.CSVFiles) > 0 {
+		warnings = append(warnings, "本次执行已勾选 CSV 数据分片，但未检测到分片产物，实际可能已回退为原脚本读取。")
+	}
 	if len(slaveHosts) > 0 {
 		finalResult := resultFiles[0]
 		if !finalResult.Exists {
 			warnings = append(warnings, "最终合并结果文件尚未生成，当前结果可能仍来自本地或远端单边文件。")
+		}
+		if strings.TrimSpace(config.GlobalConfig.JMeter.MasterHostname) == "" {
+			warnings = append(warnings, "当前未显式配置 Master 回调地址，多网卡环境下 Slave 结果回传可能失败。")
+		}
+	}
+
+	masterCallbackBaseURL := ""
+	masterDetailUploadURL := ""
+	if masterHost := strings.TrimSpace(config.GlobalConfig.JMeter.MasterHostname); masterHost != "" {
+		masterCallbackBaseURL = fmt.Sprintf("http://%s:%d", masterHost, config.GlobalConfig.Server.Port)
+		if execution.ID > 0 {
+			masterDetailUploadURL = fmt.Sprintf("%s/api/executions/%d/error-details/upload", masterCallbackBaseURL, execution.ID)
 		}
 	}
 
@@ -562,6 +850,8 @@ func buildExecutionDiagnostics(execution *model.Execution, summary map[string]in
 	diagnostics.IncludeMaster = includeMaster
 	diagnostics.SlaveCount = len(slaveHosts)
 	diagnostics.SlaveHosts = slaveHosts
+	diagnostics.MasterCallbackBaseURL = masterCallbackBaseURL
+	diagnostics.MasterDetailUploadURL = masterDetailUploadURL
 	diagnostics.ResultFiles = resultFiles
 	diagnostics.RuntimeScripts = runtimeScripts
 	diagnostics.ResultMergeReady = resultFiles[0].Exists && resultFiles[0].Size > 0
@@ -580,6 +870,7 @@ func buildExecutionDiagnostics(execution *model.Execution, summary map[string]in
 	diagnostics.PluginDependencies = dependencyScan.PluginDependencies
 	diagnostics.MissingDependencies = dependencyScan.MissingDependencies
 	diagnostics.Warnings = dedupeStrings(warnings)
+	diagnostics.Preflight = preflightReport
 
 	_ = summary
 	return diagnostics

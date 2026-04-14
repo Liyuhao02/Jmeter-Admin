@@ -63,12 +63,21 @@ type errorAnalysisCacheEntry struct {
 	Analysis  *ErrorAnalysis
 }
 
+type liveMetricsCacheEntry struct {
+	Signature string
+	ExpiresAt time.Time
+	Metrics   *LiveExecutionMetrics
+}
+
 var (
 	errorAnalysisCache   = make(map[int64]errorAnalysisCacheEntry)
 	errorAnalysisCacheMu sync.RWMutex
+	liveMetricsCache     = make(map[int64]liveMetricsCacheEntry)
+	liveMetricsCacheMu   sync.RWMutex
 )
 
 const errorAnalysisCacheTTL = 2 * time.Second
+const liveMetricsCacheTTL = 1500 * time.Millisecond
 
 // setProcessGroup 设置进程组属性（仅在 Unix 系统上）
 func setProcessGroup(cmd *exec.Cmd) {
@@ -263,8 +272,8 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 	slaveIDsJSON, _ := json.Marshal(slaveIDs)
 
 	result, err := database.DB.Exec(
-		"INSERT INTO executions (script_id, script_name, slave_ids, status, start_time, remarks, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		scriptID, script.Name, string(slaveIDsJSON), "running", startTime, remarks, startTime,
+		"INSERT INTO executions (script_id, script_name, slave_ids, status, start_time, remarks, save_http_details, include_master, split_csv, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		scriptID, script.Name, string(slaveIDsJSON), "running", startTime, remarks, boolToInt(saveHTTPDetails), boolToInt(includeMaster), boolToInt(splitCSV), startTime,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("创建执行记录失败: %w", err)
@@ -876,20 +885,30 @@ func CreateExecution(scriptID int64, slaveIDs []int64, remarks string, saveHTTPD
 
 	// 返回执行记录
 	execution := &model.Execution{
-		ID:         execID,
-		ScriptID:   scriptID,
-		ScriptName: script.Name,
-		SlaveIDs:   string(slaveIDsJSON),
-		Status:     "running",
-		StartTime:  startTime,
-		Remarks:    remarks,
-		ResultPath: resultPath,
-		ReportPath: reportPath,
-		LogPath:    logPath,
-		CreatedAt:  startTime,
+		ID:              execID,
+		ScriptID:        scriptID,
+		ScriptName:      script.Name,
+		SlaveIDs:        string(slaveIDsJSON),
+		Status:          "running",
+		StartTime:       startTime,
+		Remarks:         remarks,
+		SaveHTTPDetails: saveHTTPDetails,
+		IncludeMaster:   includeMaster,
+		SplitCSV:        splitCSV,
+		ResultPath:      resultPath,
+		ReportPath:      reportPath,
+		LogPath:         logPath,
+		CreatedAt:       startTime,
 	}
 
 	return execution, nil
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 // updateExecutionStatus 更新执行状态
@@ -965,7 +984,7 @@ func ListExecutionsFiltered(page, pageSize int, scriptID, status, keyword, start
 	}
 
 	// 查询列表
-	query := `SELECT id, script_id, script_name, slave_ids, status, start_time, end_time, duration, remarks, result_path, report_path, summary_data, log_path, is_baseline, created_at FROM executions ` + whereClause + ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	query := `SELECT id, script_id, script_name, slave_ids, status, start_time, end_time, duration, remarks, save_http_details, include_master, split_csv, result_path, report_path, summary_data, log_path, is_baseline, created_at FROM executions ` + whereClause + ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	args = append(args, pageSize, offset)
 
 	rows, err := database.DB.Query(query, args...)
@@ -979,10 +998,10 @@ func ListExecutionsFiltered(page, pageSize int, scriptID, status, keyword, start
 		var e model.Execution
 		var endTime, summaryData, remarks sql.NullString
 		var duration sql.NullInt64
-		var isBaseline int
+		var isBaseline, saveHTTPDetails, includeMaster, splitCSV int
 		err := rows.Scan(
 			&e.ID, &e.ScriptID, &e.ScriptName, &e.SlaveIDs, &e.Status,
-			&e.StartTime, &endTime, &duration, &remarks, &e.ResultPath, &e.ReportPath,
+			&e.StartTime, &endTime, &duration, &remarks, &saveHTTPDetails, &includeMaster, &splitCSV, &e.ResultPath, &e.ReportPath,
 			&summaryData, &e.LogPath, &isBaseline, &e.CreatedAt,
 		)
 		if err != nil {
@@ -1000,6 +1019,9 @@ func ListExecutionsFiltered(page, pageSize int, scriptID, status, keyword, start
 		if summaryData.Valid {
 			e.SummaryData = summaryData.String
 		}
+		e.SaveHTTPDetails = saveHTTPDetails == 1
+		e.IncludeMaster = includeMaster == 1
+		e.SplitCSV = splitCSV == 1
 		e.IsBaseline = isBaseline == 1
 		enrichExecutionForDisplay(&e, false)
 		executions = append(executions, e)
@@ -1054,13 +1076,13 @@ func GetExecution(id int64) (*model.Execution, error) {
 	var e model.Execution
 	var endTime, summaryData, remarks sql.NullString
 	var duration sql.NullInt64
-	var isBaseline int
+	var isBaseline, saveHTTPDetails, includeMaster, splitCSV int
 	err := database.DB.QueryRow(
-		"SELECT id, script_id, script_name, slave_ids, status, start_time, end_time, duration, remarks, result_path, report_path, summary_data, log_path, is_baseline, created_at FROM executions WHERE id = ?",
+		"SELECT id, script_id, script_name, slave_ids, status, start_time, end_time, duration, remarks, save_http_details, include_master, split_csv, result_path, report_path, summary_data, log_path, is_baseline, created_at FROM executions WHERE id = ?",
 		id,
 	).Scan(
 		&e.ID, &e.ScriptID, &e.ScriptName, &e.SlaveIDs, &e.Status,
-		&e.StartTime, &endTime, &duration, &remarks, &e.ResultPath, &e.ReportPath,
+		&e.StartTime, &endTime, &duration, &remarks, &saveHTTPDetails, &includeMaster, &splitCSV, &e.ResultPath, &e.ReportPath,
 		&summaryData, &e.LogPath, &isBaseline, &e.CreatedAt,
 	)
 	if err != nil {
@@ -1082,6 +1104,9 @@ func GetExecution(id int64) (*model.Execution, error) {
 	if summaryData.Valid {
 		e.SummaryData = summaryData.String
 	}
+	e.SaveHTTPDetails = saveHTTPDetails == 1
+	e.IncludeMaster = includeMaster == 1
+	e.SplitCSV = splitCSV == 1
 	e.IsBaseline = isBaseline == 1
 	enrichExecutionForDisplay(&e, true)
 
@@ -1103,6 +1128,11 @@ func GetExecutionLiveMetrics(id int64) (*LiveExecutionMetrics, error) {
 	resultPaths := discoverExecutionResultPaths(resultPath)
 	if len(resultPaths) == 0 {
 		return &LiveExecutionMetrics{Status: execution.Status, Points: []LiveMetricPoint{}}, nil
+	}
+
+	cacheSignature := buildLiveMetricsSignature(execution.Status, resultPaths)
+	if cached := getCachedLiveMetrics(id, cacheSignature); cached != nil {
+		return cached, nil
 	}
 
 	colIndex := make(map[string]int)
@@ -1240,7 +1270,9 @@ func GetExecutionLiveMetrics(id int64) (*LiveExecutionMetrics, error) {
 			for _, field := range required {
 				if _, ok := colIndex[field]; !ok {
 					file.Close()
-					return &LiveExecutionMetrics{Status: execution.Status, Points: []LiveMetricPoint{}}, nil
+					empty := &LiveExecutionMetrics{Status: execution.Status, Points: []LiveMetricPoint{}}
+					setCachedLiveMetrics(id, cacheSignature, empty)
+					return empty, nil
 				}
 			}
 		}
@@ -1384,7 +1416,7 @@ func GetExecutionLiveMetrics(id int64) (*LiveExecutionMetrics, error) {
 		peakPrimaryThroughput = peakTPS
 	}
 
-	return &LiveExecutionMetrics{
+	metrics := &LiveExecutionMetrics{
 		Status:                   execution.Status,
 		TotalRequests:            totalRequests,
 		SuccessRequests:          successRequests,
@@ -1413,7 +1445,44 @@ func GetExecutionLiveMetrics(id int64) (*LiveExecutionMetrics, error) {
 		PeakConcurrency:          peakConcurrency,
 		DurationSeconds:          durationSeconds,
 		Points:                   points,
-	}, nil
+	}
+	setCachedLiveMetrics(id, cacheSignature, metrics)
+	return metrics, nil
+}
+
+func buildLiveMetricsSignature(status string, resultPaths []string) string {
+	var builder strings.Builder
+	builder.WriteString(status)
+	for _, currentPath := range resultPaths {
+		builder.WriteString("|")
+		builder.WriteString(currentPath)
+		if info, err := os.Stat(currentPath); err == nil {
+			builder.WriteString(fmt.Sprintf(":%d:%d", info.Size(), info.ModTime().UnixNano()))
+			continue
+		}
+		builder.WriteString(":missing")
+	}
+	return builder.String()
+}
+
+func getCachedLiveMetrics(execID int64, signature string) *LiveExecutionMetrics {
+	liveMetricsCacheMu.RLock()
+	entry, ok := liveMetricsCache[execID]
+	liveMetricsCacheMu.RUnlock()
+	if !ok || entry.Signature != signature || time.Now().After(entry.ExpiresAt) {
+		return nil
+	}
+	return entry.Metrics
+}
+
+func setCachedLiveMetrics(execID int64, signature string, metrics *LiveExecutionMetrics) {
+	liveMetricsCacheMu.Lock()
+	liveMetricsCache[execID] = liveMetricsCacheEntry{
+		Signature: signature,
+		ExpiresAt: time.Now().Add(liveMetricsCacheTTL),
+		Metrics:   metrics,
+	}
+	liveMetricsCacheMu.Unlock()
 }
 
 // StopExecution 停止执行
@@ -2307,6 +2376,7 @@ type ErrorType struct {
 	Label           string        `json:"label"`
 	ResponseCode    string        `json:"response_code"`
 	ResponseMessage string        `json:"response_message"`
+	Category        string        `json:"category"`
 	ResponsePreview string        `json:"response_preview"`
 	Count           int           `json:"count"`
 	Percentage      float64       `json:"percentage"`
@@ -2336,6 +2406,18 @@ type MessageCount struct {
 	Count   int    `json:"count"`
 }
 
+type ErrorCluster struct {
+	Key        string   `json:"key"`
+	Label      string   `json:"label"`
+	Count      int      `json:"count"`
+	Percentage float64  `json:"percentage"`
+	Tone       string   `json:"tone"`
+	Example    string   `json:"example"`
+	TopLabels  []string `json:"top_labels,omitempty"`
+	TopSources []string `json:"top_sources,omitempty"`
+	URL        string   `json:"url,omitempty"`
+}
+
 // ErrorAnalysis 错误分析结果
 type ErrorAnalysis struct {
 	TotalErrors              int             `json:"total_errors"`
@@ -2355,6 +2437,33 @@ type ErrorAnalysis struct {
 	ResponseCodeDistribution []CodeCount     `json:"response_code_distribution"`
 	ErrorTimeline            []TimelinePoint `json:"error_timeline"`
 	TopErrorMessages         []MessageCount  `json:"top_error_messages"`
+	CategoryDistribution     []ErrorCluster  `json:"category_distribution"`
+	SourceDistribution       []ErrorCluster  `json:"source_distribution"`
+	APIDistribution          []ErrorCluster  `json:"api_distribution"`
+	ReportHighlights         []string        `json:"report_highlights"`
+}
+
+type ErrorAnalysisOverview struct {
+	TotalErrors              int             `json:"total_errors"`
+	TotalSamples             int             `json:"total_samples"`
+	ErrorRate                float64         `json:"error_rate"`
+	ErrorTypes               []ErrorType     `json:"error_types"`
+	Truncated                bool            `json:"truncated"`
+	TypeTruncated            map[string]bool `json:"type_truncated"`
+	DetailFieldsAvailable    bool            `json:"detail_fields_available"`
+	DetailStorageHint        string          `json:"detail_storage_hint"`
+	AvailableDetailFields    []string        `json:"available_detail_fields"`
+	ExpectedDetailSources    []string        `json:"expected_detail_sources"`
+	ReceivedDetailSources    []string        `json:"received_detail_sources"`
+	MissingDetailSources     []string        `json:"missing_detail_sources"`
+	DetailUploadWarning      string          `json:"detail_upload_warning"`
+	ResponseCodeDistribution []CodeCount     `json:"response_code_distribution"`
+	ErrorTimeline            []TimelinePoint `json:"error_timeline"`
+	TopErrorMessages         []MessageCount  `json:"top_error_messages"`
+	CategoryDistribution     []ErrorCluster  `json:"category_distribution"`
+	SourceDistribution       []ErrorCluster  `json:"source_distribution"`
+	APIDistribution          []ErrorCluster  `json:"api_distribution"`
+	ReportHighlights         []string        `json:"report_highlights"`
 }
 
 type LiveMetricPoint struct {
@@ -3023,7 +3132,240 @@ func buildEmptyErrorAnalysis(execution *model.Execution, hint string) *ErrorAnal
 		ReceivedDetailSources: []string{},
 		MissingDetailSources:  []string{},
 		DetailUploadWarning:   "",
+		CategoryDistribution:  []ErrorCluster{},
+		SourceDistribution:    []ErrorCluster{},
+		APIDistribution:       []ErrorCluster{},
+		ReportHighlights:      []string{},
 	}
+}
+
+func normalizeErrorSourceLabel(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return "未知来源"
+	}
+	return source
+}
+
+func classifyErrorCategory(responseCode, responseMessage, failureMessage string) (string, string, string) {
+	normalizedCode := strings.TrimSpace(strings.ToLower(responseCode))
+	normalizedMessage := strings.TrimSpace(strings.ToLower(responseMessage))
+	normalizedFailure := strings.TrimSpace(strings.ToLower(failureMessage))
+	combined := strings.Join([]string{normalizedCode, normalizedMessage, normalizedFailure}, " ")
+
+	switch {
+	case strings.Contains(combined, "csvdataset") ||
+		strings.Contains(combined, "fileserver") ||
+		strings.Contains(combined, "must exist and be readable") ||
+		strings.Contains(combined, "could not read file header line"):
+		return "csv_dependency", "CSV/文件依赖", "warning"
+	case strings.Contains(combined, "jsr223") ||
+		strings.Contains(combined, "groovy") ||
+		strings.Contains(combined, "beanshell") ||
+		strings.Contains(combined, "scriptexception"):
+		return "script_runtime", "脚本运行异常", "danger"
+	case strings.Contains(combined, "assert") ||
+		strings.Contains(combined, "expected to contain") ||
+		strings.Contains(combined, "test failed:"):
+		if normalizedCode == "200" || normalizedCode == "" {
+			return "business_assertion", "业务断言失败", "danger"
+		}
+		return "assertion", "断言失败", "danger"
+	case strings.Contains(combined, "read timed out") ||
+		strings.Contains(combined, "sockettimeoutexception") ||
+		strings.Contains(combined, "response timeout"):
+		return "response_timeout", "响应超时", "warning"
+	case strings.Contains(combined, "connect timed out") ||
+		strings.Contains(combined, "connection refused") ||
+		strings.Contains(combined, "unknownhost") ||
+		strings.Contains(combined, "no route to host") ||
+		strings.Contains(combined, "broken pipe") ||
+		strings.Contains(combined, "connection reset") ||
+		strings.Contains(combined, "non http response code"):
+		return "network", "网络连接异常", "warning"
+	case strings.HasPrefix(normalizedCode, "5"):
+		return "http_5xx", "服务端错误", "danger"
+	case strings.HasPrefix(normalizedCode, "4"):
+		return "http_4xx", "客户端错误", "warning"
+	case normalizedCode == "200" && normalizedFailure != "":
+		return "business_failure", "业务失败", "danger"
+	default:
+		return "other", "其他失败", "warning"
+	}
+}
+
+func summarizeClusterTopKeys(counts map[string]int, limit int) []string {
+	if len(counts) == 0 || limit <= 0 {
+		return nil
+	}
+	type item struct {
+		Key   string
+		Count int
+	}
+	items := make([]item, 0, len(counts))
+	for key, count := range counts {
+		items = append(items, item{Key: key, Count: count})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Count == items[j].Count {
+			return items[i].Key < items[j].Key
+		}
+		return items[i].Count > items[j].Count
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	result := make([]string, 0, len(items))
+	for _, current := range items {
+		result = append(result, current.Key)
+	}
+	return result
+}
+
+func buildErrorAnalysisOverview(analysis *ErrorAnalysis) *ErrorAnalysisOverview {
+	if analysis == nil {
+		return nil
+	}
+	return &ErrorAnalysisOverview{
+		TotalErrors:              analysis.TotalErrors,
+		TotalSamples:             analysis.TotalSamples,
+		ErrorRate:                analysis.ErrorRate,
+		ErrorTypes:               analysis.ErrorTypes,
+		Truncated:                analysis.Truncated,
+		TypeTruncated:            analysis.TypeTruncated,
+		DetailFieldsAvailable:    analysis.DetailFieldsAvailable,
+		DetailStorageHint:        analysis.DetailStorageHint,
+		AvailableDetailFields:    analysis.AvailableDetailFields,
+		ExpectedDetailSources:    analysis.ExpectedDetailSources,
+		ReceivedDetailSources:    analysis.ReceivedDetailSources,
+		MissingDetailSources:     analysis.MissingDetailSources,
+		DetailUploadWarning:      analysis.DetailUploadWarning,
+		ResponseCodeDistribution: analysis.ResponseCodeDistribution,
+		ErrorTimeline:            analysis.ErrorTimeline,
+		TopErrorMessages:         analysis.TopErrorMessages,
+		CategoryDistribution:     analysis.CategoryDistribution,
+		SourceDistribution:       analysis.SourceDistribution,
+		APIDistribution:          analysis.APIDistribution,
+		ReportHighlights:         analysis.ReportHighlights,
+	}
+}
+
+func buildErrorReportHighlights(analysis *ErrorAnalysis) []string {
+	if analysis == nil || analysis.TotalErrors == 0 {
+		return []string{"当前执行没有错误样本，可直接进入指标复盘阶段。"}
+	}
+
+	highlights := make([]string, 0, 5)
+	if len(analysis.CategoryDistribution) > 0 {
+		top := analysis.CategoryDistribution[0]
+		highlights = append(highlights, fmt.Sprintf("错误主要集中在“%s”，共 %d 条，占全部错误 %.2f%%。", top.Label, top.Count, top.Percentage))
+	}
+	if len(analysis.APIDistribution) > 0 {
+		top := analysis.APIDistribution[0]
+		target := top.Label
+		if strings.TrimSpace(target) == "" {
+			target = top.URL
+		}
+		highlights = append(highlights, fmt.Sprintf("最需要优先排查的接口是“%s”，累计失败 %d 次。", target, top.Count))
+	}
+	if len(analysis.SourceDistribution) > 0 {
+		top := analysis.SourceDistribution[0]
+		if top.Label != "未知来源" {
+			highlights = append(highlights, fmt.Sprintf("错误来源最集中的节点是 %s，占错误总量 %.2f%%。", top.Label, top.Percentage))
+		}
+	}
+	if analysis.DetailUploadWarning != "" {
+		highlights = append(highlights, analysis.DetailUploadWarning)
+	}
+	if len(analysis.TopErrorMessages) > 0 {
+		top := analysis.TopErrorMessages[0]
+		highlights = append(highlights, fmt.Sprintf("Top 失败信息为“%s”，出现 %d 次。", top.Message, top.Count))
+	}
+	if len(highlights) == 0 {
+		highlights = append(highlights, fmt.Sprintf("当前共识别 %d 条错误记录，建议结合错误类型分布继续排查。", analysis.TotalErrors))
+	}
+	return highlights
+}
+
+func BuildExecutionErrorReportMarkdown(execution *model.Execution, analysis *ErrorAnalysis) string {
+	title := "执行错误报告"
+	if execution != nil && strings.TrimSpace(execution.ScriptName) != "" {
+		title = fmt.Sprintf("执行错误报告 - %s", execution.ScriptName)
+	}
+
+	lines := []string{
+		"# " + title,
+		"",
+		fmt.Sprintf("- 生成时间：%s", time.Now().Format("2006-01-02 15:04:05")),
+	}
+	if execution != nil {
+		lines = append(lines, fmt.Sprintf("- 执行 ID：%d", execution.ID))
+		lines = append(lines, fmt.Sprintf("- 执行状态：%s", execution.Status))
+		lines = append(lines, fmt.Sprintf("- 开始时间：%s", strings.TrimSpace(execution.StartTime)))
+		lines = append(lines, fmt.Sprintf("- 结束时间：%s", strings.TrimSpace(execution.EndTime)))
+	}
+	lines = append(lines, "")
+
+	if analysis == nil {
+		lines = append(lines, "当前没有可用的错误分析数据。")
+		return strings.Join(lines, "\n")
+	}
+
+	lines = append(lines,
+		"## 概览",
+		"",
+		fmt.Sprintf("- 总样本数：%d", analysis.TotalSamples),
+		fmt.Sprintf("- 错误总数：%d", analysis.TotalErrors),
+		fmt.Sprintf("- 错误率：%.2f%%", analysis.ErrorRate),
+		"",
+		"## 复盘结论",
+		"",
+	)
+	for _, item := range analysis.ReportHighlights {
+		lines = append(lines, "- "+item)
+	}
+
+	appendClusterSection := func(title string, items []ErrorCluster) {
+		if len(items) == 0 {
+			return
+		}
+		lines = append(lines, "", "## "+title, "")
+		limit := len(items)
+		if limit > 10 {
+			limit = 10
+		}
+		for idx := 0; idx < limit; idx++ {
+			current := items[idx]
+			line := fmt.Sprintf("- %s：%d 条，占比 %.2f%%", current.Label, current.Count, current.Percentage)
+			if current.URL != "" {
+				line += fmt.Sprintf("，URL: %s", current.URL)
+			}
+			if current.Example != "" {
+				line += fmt.Sprintf("，样例: %s", current.Example)
+			}
+			lines = append(lines, line)
+		}
+	}
+
+	appendClusterSection("错误分类聚类", analysis.CategoryDistribution)
+	appendClusterSection("错误来源节点", analysis.SourceDistribution)
+	appendClusterSection("失败接口 Top", analysis.APIDistribution)
+
+	if len(analysis.TopErrorMessages) > 0 {
+		lines = append(lines, "", "## Top 错误信息", "")
+		for _, item := range analysis.TopErrorMessages {
+			lines = append(lines, fmt.Sprintf("- %s：%d 次", item.Message, item.Count))
+		}
+	}
+
+	if analysis.DetailUploadWarning != "" {
+		lines = append(lines, "", "## 明细链路提示", "", "- "+analysis.DetailUploadWarning)
+		if len(analysis.MissingDetailSources) > 0 {
+			lines = append(lines, fmt.Sprintf("- 未回传节点：%s", strings.Join(analysis.MissingDetailSources, "、")))
+		}
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func statSignaturePart(path string) string {
@@ -3217,6 +3559,16 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 	const maxRecordsPerType = 10000
 	const maxSamplesPerType = 5
 
+	type clusterAccumulator struct {
+		Label        string
+		Tone         string
+		Example      string
+		URL          string
+		Count        int
+		LabelCounts  map[string]int
+		SourceCounts map[string]int
+	}
+
 	var totalSamples int
 	var totalErrors int
 
@@ -3236,6 +3588,9 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 	timelineMap := make(map[string]*TimelinePoint) // "HH:MM:SS" → point (10秒粒度)
 	messageCounts := make(map[string]int)          // failureMessage → count
 	totalSamplesByBucket := make(map[string]int)   // 每个时间桶总样本数
+	categoryMap := make(map[string]*clusterAccumulator)
+	sourceMap := make(map[string]*clusterAccumulator)
+	apiMap := make(map[string]*clusterAccumulator)
 
 	getField := func(record []string, field string) string {
 		if idx, ok := colIndex[strings.TrimSpace(field)]; ok && idx < len(record) {
@@ -3385,6 +3740,53 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 			ConnectTime:     connectTime,
 		}
 
+		categoryKey, categoryLabel, categoryTone := classifyErrorCategory(responseCode, responseMessage, failureMessage)
+		sourceLabel := normalizeErrorSourceLabel(detailSource)
+		apiKey := strings.TrimSpace(label)
+		if strings.TrimSpace(url) != "" {
+			apiKey += "|" + strings.TrimSpace(url)
+		}
+		if strings.TrimSpace(apiKey) == "" {
+			apiKey = strings.TrimSpace(url)
+		}
+
+		ensureCluster := func(store map[string]*clusterAccumulator, key, label, tone string) *clusterAccumulator {
+			if current, ok := store[key]; ok {
+				return current
+			}
+			current := &clusterAccumulator{
+				Label:        label,
+				Tone:         tone,
+				LabelCounts:  make(map[string]int),
+				SourceCounts: make(map[string]int),
+			}
+			store[key] = current
+			return current
+		}
+
+		categoryCluster := ensureCluster(categoryMap, categoryKey, categoryLabel, categoryTone)
+		categoryCluster.Count++
+		categoryCluster.LabelCounts[label]++
+		categoryCluster.SourceCounts[sourceLabel]++
+		if categoryCluster.Example == "" {
+			categoryCluster.Example = failureMessage
+		}
+
+		sourceCluster := ensureCluster(sourceMap, sourceLabel, sourceLabel, "warning")
+		sourceCluster.Count++
+		sourceCluster.LabelCounts[label]++
+		if sourceCluster.Example == "" {
+			sourceCluster.Example = failureMessage
+		}
+
+		apiCluster := ensureCluster(apiMap, apiKey, label, "danger")
+		apiCluster.Count++
+		apiCluster.URL = url
+		apiCluster.SourceCounts[sourceLabel]++
+		if apiCluster.Example == "" {
+			apiCluster.Example = failureMessage
+		}
+
 		// 更新错误类型统计
 		typeKey := label + "|" + responseCode
 		if et, ok := errorTypeMap[typeKey]; ok {
@@ -3398,6 +3800,7 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 				Label:           label,
 				ResponseCode:    responseCode,
 				ResponseMessage: responseMessage,
+				Category:        categoryLabel,
 				ResponsePreview: buildResponsePreview(responseData, failureMessage),
 				Count:           1,
 				FirstTime:       timestamp,
@@ -3432,6 +3835,34 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 	sort.Slice(errorTypes, func(i, j int) bool {
 		return errorTypes[i].Count > errorTypes[j].Count
 	})
+
+	buildClusters := func(store map[string]*clusterAccumulator) []ErrorCluster {
+		clusters := make([]ErrorCluster, 0, len(store))
+		for key, current := range store {
+			percentage := 0.0
+			if totalErrors > 0 {
+				percentage = float64(current.Count) * 100.0 / float64(totalErrors)
+			}
+			clusters = append(clusters, ErrorCluster{
+				Key:        key,
+				Label:      current.Label,
+				Count:      current.Count,
+				Percentage: percentage,
+				Tone:       current.Tone,
+				Example:    current.Example,
+				URL:        current.URL,
+				TopLabels:  summarizeClusterTopKeys(current.LabelCounts, 3),
+				TopSources: summarizeClusterTopKeys(current.SourceCounts, 3),
+			})
+		}
+		sort.Slice(clusters, func(i, j int) bool {
+			if clusters[i].Count == clusters[j].Count {
+				return clusters[i].Label < clusters[j].Label
+			}
+			return clusters[i].Count > clusters[j].Count
+		})
+		return clusters
+	}
 
 	errorRate := 0.0
 	if totalSamples > 0 {
@@ -3487,6 +3918,10 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 		topErrorMessages = topErrorMessages[:10]
 	}
 
+	categoryDistribution := buildClusters(categoryMap)
+	sourceDistribution := buildClusters(sourceMap)
+	apiDistribution := buildClusters(apiMap)
+
 	analysis := &ErrorAnalysis{
 		TotalErrors:              totalErrors,
 		TotalSamples:             totalSamples,
@@ -3505,12 +3940,24 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 		ResponseCodeDistribution: responseCodeDistribution,
 		ErrorTimeline:            errorTimeline,
 		TopErrorMessages:         topErrorMessages,
+		CategoryDistribution:     categoryDistribution,
+		SourceDistribution:       sourceDistribution,
+		APIDistribution:          apiDistribution,
 	}
+	analysis.ReportHighlights = buildErrorReportHighlights(analysis)
 	setCachedErrorAnalysis(execID, cacheSignature, analysis)
 	if err := saveIndexedErrorAnalysis(resultPath, cacheSignature, analysis); err != nil {
 		fmt.Printf("[错误分析索引][警告] 保存执行 #%d 的索引失败: %v\n", execID, err)
 	}
 	return analysis, nil
+}
+
+func GetExecutionErrorOverview(execID int64) (*ErrorAnalysisOverview, error) {
+	analysis, err := GetExecutionErrors(execID)
+	if err != nil {
+		return nil, err
+	}
+	return buildErrorAnalysisOverview(analysis), nil
 }
 
 // StreamExecutionLog 流式读取执行日志
@@ -3946,13 +4393,13 @@ func GetBaselineForScript(scriptID int64) (*model.Execution, error) {
 	var e model.Execution
 	var endTime, summaryData, remarks sql.NullString
 	var duration sql.NullInt64
-	var isBaseline int
+	var isBaseline, saveHTTPDetails, includeMaster, splitCSV int
 	err := database.DB.QueryRow(
-		"SELECT id, script_id, script_name, slave_ids, status, start_time, end_time, duration, remarks, result_path, report_path, summary_data, log_path, is_baseline, created_at FROM executions WHERE script_id = ? AND is_baseline = 1",
+		"SELECT id, script_id, script_name, slave_ids, status, start_time, end_time, duration, remarks, save_http_details, include_master, split_csv, result_path, report_path, summary_data, log_path, is_baseline, created_at FROM executions WHERE script_id = ? AND is_baseline = 1",
 		scriptID,
 	).Scan(
 		&e.ID, &e.ScriptID, &e.ScriptName, &e.SlaveIDs, &e.Status,
-		&e.StartTime, &endTime, &duration, &remarks, &e.ResultPath, &e.ReportPath,
+		&e.StartTime, &endTime, &duration, &remarks, &saveHTTPDetails, &includeMaster, &splitCSV, &e.ResultPath, &e.ReportPath,
 		&summaryData, &e.LogPath, &isBaseline, &e.CreatedAt,
 	)
 	if err != nil {
@@ -3974,6 +4421,9 @@ func GetBaselineForScript(scriptID int64) (*model.Execution, error) {
 	if summaryData.Valid {
 		e.SummaryData = summaryData.String
 	}
+	e.SaveHTTPDetails = saveHTTPDetails == 1
+	e.IncludeMaster = includeMaster == 1
+	e.SplitCSV = splitCSV == 1
 	e.IsBaseline = isBaseline == 1
 
 	return &e, nil

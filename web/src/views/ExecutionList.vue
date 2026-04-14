@@ -1,8 +1,30 @@
 <template>
   <div class="execution-list-page">
+    <section class="workspace-hero">
+      <div class="workspace-hero-main">
+        <div class="workspace-copy">
+          <div class="workspace-kicker">WORKSPACE</div>
+          <h1>执行记录管理</h1>
+          <p>统一查看运行状态、基准对比和关键性能指标，运行中的任务、已完成结果与后续回溯都在同一条操作链路里完成。</p>
+        </div>
+        <div class="workspace-hero-pills">
+          <span class="workspace-pill">总执行 {{ stats.total }}</span>
+          <span class="workspace-pill">运行中 {{ stats.running }}</span>
+          <span class="workspace-pill">失败 {{ stats.failed }}</span>
+        </div>
+      </div>
+    </section>
+
     <!-- 统计卡片区域 -->
     <div class="stats-section" v-loading="statsLoading">
-      <div class="stat-card" @click="filterByStatus('')">
+      <button
+        type="button"
+        class="stat-card"
+        :class="{ active: filters.status === '' }"
+        :aria-pressed="filters.status === ''"
+        aria-label="查看全部执行记录"
+        @click="filterByStatus('')"
+      >
         <div class="stat-icon total">
           <el-icon><Document /></el-icon>
         </div>
@@ -10,8 +32,15 @@
           <div class="stat-value">{{ stats.total }}</div>
           <div class="stat-label">总执行数</div>
         </div>
-      </div>
-      <div class="stat-card" @click="filterByStatus('running')">
+      </button>
+      <button
+        type="button"
+        class="stat-card"
+        :class="{ active: filters.status === 'running' }"
+        :aria-pressed="filters.status === 'running'"
+        aria-label="筛选运行中的执行记录"
+        @click="filterByStatus('running')"
+      >
         <div class="stat-icon running">
           <el-icon><Loading /></el-icon>
         </div>
@@ -19,8 +48,15 @@
           <div class="stat-value">{{ stats.running }}</div>
           <div class="stat-label">运行中</div>
         </div>
-      </div>
-      <div class="stat-card" @click="filterByStatus('success')">
+      </button>
+      <button
+        type="button"
+        class="stat-card"
+        :class="{ active: filters.status === 'success' }"
+        :aria-pressed="filters.status === 'success'"
+        aria-label="筛选已完成的执行记录"
+        @click="filterByStatus('success')"
+      >
         <div class="stat-icon completed">
           <el-icon><CircleCheck /></el-icon>
         </div>
@@ -28,8 +64,15 @@
           <div class="stat-value">{{ stats.completed }}</div>
           <div class="stat-label">已完成</div>
         </div>
-      </div>
-      <div class="stat-card" @click="filterByStatus('failed')">
+      </button>
+      <button
+        type="button"
+        class="stat-card"
+        :class="{ active: filters.status === 'failed' }"
+        :aria-pressed="filters.status === 'failed'"
+        aria-label="筛选失败的执行记录"
+        @click="filterByStatus('failed')"
+      >
         <div class="stat-icon failed">
           <el-icon><CircleClose /></el-icon>
         </div>
@@ -37,8 +80,15 @@
           <div class="stat-value">{{ stats.failed }}</div>
           <div class="stat-label">失败</div>
         </div>
-      </div>
-      <div class="stat-card" @click="filterByStatus('stopped')">
+      </button>
+      <button
+        type="button"
+        class="stat-card"
+        :class="{ active: filters.status === 'stopped' }"
+        :aria-pressed="filters.status === 'stopped'"
+        aria-label="筛选已停止的执行记录"
+        @click="filterByStatus('stopped')"
+      >
         <div class="stat-icon stopped">
           <el-icon><VideoPause /></el-icon>
         </div>
@@ -46,11 +96,15 @@
           <div class="stat-value">{{ stats.stopped }}</div>
           <div class="stat-label">已停止</div>
         </div>
-      </div>
+      </button>
     </div>
 
     <!-- 筛选区域 -->
     <div class="section-card filter-section">
+      <div class="filter-head">
+        <div class="section-label">FILTERS</div>
+        <div class="filter-head-copy">按脚本、状态、日期和备注快速定位执行记录，运行中的任务会自动续刷。</div>
+      </div>
       <div class="filter-bar">
         <el-select
           v-model="filters.script_id"
@@ -93,6 +147,7 @@
           placeholder="搜索备注..."
           clearable
           class="filter-input"
+          @clear="handleSearch"
           @keyup.enter="handleSearch"
         />
 
@@ -115,6 +170,7 @@
         <div class="section-header">
           <div class="section-label">EXECUTIONS</div>
           <div class="section-title">执行记录</div>
+          <div class="section-desc">聚焦运行状态、基准线和核心指标，常用操作在一行里就能完成，不需要反复切换页面。</div>
         </div>
         <div class="section-actions">
           <el-button 
@@ -137,68 +193,94 @@
         </div>
       </div>
 
+      <div class="list-utility-bar">
+        <span class="utility-chip">共 {{ pagination.total }} 条记录</span>
+        <span class="utility-chip" v-if="hasRunning">运行中任务会自动轮询刷新</span>
+        <span class="utility-chip" v-if="selectedExecutions.length">已选 {{ selectedExecutions.length }} 条记录</span>
+      </div>
+
       <!-- 执行记录表格 -->
-      <el-table
-        ref="tableRef"
-        v-loading="tableLoading"
-        :data="executionList"
-        class="executions-table"
-        stripe
-        @selection-change="handleSelectionChange"
-      >
-        <el-table-column type="selection" width="45" align="center" />
+      <div class="execution-table-shell">
+        <el-table
+          ref="tableRef"
+          v-loading="tableLoading"
+          :data="executionList"
+          class="executions-table"
+          stripe
+          @selection-change="handleSelectionChange"
+        >
+          <el-table-column type="selection" width="42" align="center" />
         <el-table-column label="#" width="60" align="center">
           <template #default="{ $index }">
             <span class="index-text">{{ (pagination.page - 1) * pagination.page_size + $index + 1 }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="脚本名称" min-width="140" sortable prop="script_name" show-overflow-tooltip>
+        <el-table-column label="脚本名称" min-width="176" sortable prop="script_name" show-overflow-tooltip>
           <template #default="{ row }">
             <div class="script-name-cell">
               <el-icon class="script-icon"><Document /></el-icon>
-              <span class="script-name">{{ row.script_name }}</span>
+              <div class="script-name-stack">
+                <span class="script-name">{{ row.script_name }}</span>
+                <span class="script-id">#{{ row.id }}</span>
+              </div>
             </div>
           </template>
         </el-table-column>
 
-        <el-table-column label="状态" width="90" align="center">
+        <el-table-column label="状态" width="132" align="center">
           <template #default="{ row }">
-            <el-tag
-              :type="getStatusType(row)"
-              size="small"
-              class="status-tag"
+            <el-tooltip :content="getStatusText(row)" placement="top">
+              <el-tag
+                :type="getStatusType(row)"
+                size="small"
+                class="status-tag"
+              >
+                {{ getStatusShortText(row) }}
+              </el-tag>
+            </el-tooltip>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="备注" width="54" align="center">
+          <template #default="{ row }">
+            <el-tooltip
+              :content="row.remarks || '暂无备注'"
+              placement="top"
+              :disabled="!row.remarks"
+              :show-after="220"
             >
-              {{ getStatusText(row) }}
-            </el-tag>
+              <button
+                type="button"
+                class="remarks-trigger"
+                :class="{ empty: !row.remarks }"
+                :aria-label="row.remarks ? `查看备注：${row.remarks}` : '暂无备注'"
+              >
+                <el-icon><ChatDotRound /></el-icon>
+              </button>
+            </el-tooltip>
           </template>
         </el-table-column>
 
-        <el-table-column label="备注" min-width="120" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span class="remarks-text">{{ row.remarks || '-' }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="开始时间" width="150" sortable prop="created_at">
+        <el-table-column label="开始时间" width="156" sortable prop="created_at">
           <template #default="{ row }">
             <span class="time-text">{{ formatDateTime(row.created_at) }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="执行时长" width="110" align="right" header-align="right" sortable prop="duration">
+        <el-table-column label="执行时长" width="108" align="right" header-align="right" sortable prop="duration">
           <template #default="{ row }">
             <span class="duration-text">{{ formatDuration(getDurationSeconds(row)) }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="样本数" width="80" align="right" header-align="right" sortable :sort-method="(a, b) => getSummaryField(a, 'total_samples') - getSummaryField(b, 'total_samples')">
+        <el-table-column label="样本数" width="94" align="right" header-align="right" sortable :sort-method="(a, b) => getSummaryField(a, 'total_samples') - getSummaryField(b, 'total_samples')">
           <template #default="{ row }">
             <span class="metric-value metric-blue">{{ formatNumber(getSummaryField(row, 'total_samples')) }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="平均RT" width="110" align="right" header-align="right" sortable :sort-method="(a, b) => getResponseTime(a) - getResponseTime(b)">
+        <el-table-column label="平均RT" width="116" align="right" header-align="right" sortable :sort-method="(a, b) => getResponseTime(a) - getResponseTime(b)">
           <template #default="{ row }">
             <div class="metric-with-unit">
               <span
@@ -212,7 +294,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="TPS / 请求率" width="120" align="right" header-align="right" sortable :sort-method="(a, b) => getThroughput(a) - getThroughput(b)">
+        <el-table-column label="TPS / 请求率" width="144" align="right" header-align="right" sortable :sort-method="(a, b) => getThroughput(a) - getThroughput(b)">
           <template #default="{ row }">
             <div class="metric-with-unit">
               <span class="metric-value metric-blue">{{ formatNumber(getThroughput(row)) }}</span>
@@ -221,7 +303,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="错误率" width="80" align="right" header-align="right" sortable :sort-method="(a, b) => getErrorRateNum(a) - getErrorRateNum(b)">
+        <el-table-column label="错误率" width="108" align="right" header-align="right" sortable :sort-method="(a, b) => getErrorRateNum(a) - getErrorRateNum(b)">
           <template #default="{ row }">
             <div class="metric-with-unit">
               <span
@@ -235,59 +317,85 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="180" fixed="right">
+        <el-table-column
+          label="操作"
+          fixed="right"
+          width="156"
+          align="center"
+          header-align="center"
+          class-name="action-column"
+          label-class-name="action-column-header"
+        >
           <template #default="{ row }">
             <div class="action-btns">
-              <el-button
-                link
-                type="primary"
-                @click="viewDetail(row.id)"
-                class="action-btn view-btn"
+              <el-tooltip content="查看详情" placement="top">
+                <el-button
+                  text
+                  type="primary"
+                  @click="viewDetail(row.id)"
+                  class="action-btn action-icon view-btn"
+                  aria-label="查看详情"
+                >
+                  <el-icon><View /></el-icon>
+                </el-button>
+              </el-tooltip>
+              <el-tooltip
+                v-if="canToggleBaseline(row)"
+                :content="row.is_baseline ? '取消基准线' : '设为基准线'"
+                placement="top"
               >
-                <el-icon><View /></el-icon>
-                查看
-              </el-button>
-              <el-button
+                <el-button
+                  text
+                  :type="row.is_baseline ? 'warning' : 'default'"
+                  @click="toggleBaseline(row)"
+                  class="action-btn action-icon baseline-btn"
+                  :aria-label="row.is_baseline ? '取消基准线' : '设为基准线'"
+                >
+                  <el-icon>
+                    <StarFilled v-if="row.is_baseline" />
+                    <Star v-else />
+                  </el-icon>
+                </el-button>
+              </el-tooltip>
+              <el-tooltip
                 v-if="row.status === 'running'"
-                link
-                type="warning"
-                @click="handleStop(row)"
-                :loading="stoppingId === row.id"
-                :disabled="stoppingId === row.id"
-                class="action-btn stop-btn"
+                content="停止执行"
+                placement="top"
               >
-                <el-icon v-if="stoppingId !== row.id"><VideoPause /></el-icon>
-                停止
-              </el-button>
-              <el-button
+                <el-button
+                  text
+                  type="warning"
+                  @click="handleStop(row)"
+                  :loading="stoppingId === row.id"
+                  :disabled="stoppingId === row.id"
+                  class="action-btn action-icon stop-btn"
+                  aria-label="停止执行"
+                >
+                  <el-icon v-if="stoppingId !== row.id"><VideoPause /></el-icon>
+                </el-button>
+              </el-tooltip>
+              <el-tooltip
                 v-if="row.status !== 'running'"
-                link
-                type="danger"
-                @click="handleDelete(row)"
-                :loading="deletingId === row.id"
-                :disabled="deletingId === row.id"
-                class="action-btn delete-btn"
+                content="删除记录"
+                placement="top"
               >
-                <el-icon v-if="deletingId !== row.id"><Delete /></el-icon>
-                删除
-              </el-button>
-              <el-button
-                v-if="row.status === 'success'"
-                link
-                :type="row.is_baseline ? 'warning' : 'default'"
-                @click="toggleBaseline(row)"
-                class="action-btn baseline-btn"
-              >
-                <el-icon>
-                  <StarFilled v-if="row.is_baseline" />
-                  <Star v-else />
-                </el-icon>
-                {{ row.is_baseline ? '取消基准' : '设为基准' }}
-              </el-button>
+                <el-button
+                  text
+                  type="danger"
+                  @click="handleDelete(row)"
+                  :loading="deletingId === row.id"
+                  :disabled="deletingId === row.id"
+                  class="action-btn action-icon delete-btn"
+                  aria-label="删除记录"
+                >
+                  <el-icon v-if="deletingId !== row.id"><Delete /></el-icon>
+                </el-button>
+              </el-tooltip>
             </div>
           </template>
         </el-table-column>
-      </el-table>
+        </el-table>
+      </div>
 
       <!-- 空状态 -->
       <div v-if="!tableLoading && executionList.length === 0" class="empty-state">
@@ -382,10 +490,11 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { 
-  View, 
+  View,
   CircleClose, 
   Refresh, 
   Document, 
+  ChatDotRound,
   DocumentDelete, 
   Search,
   RefreshRight,
@@ -414,6 +523,8 @@ const clockTimer = ref(null)
 const nowTick = ref(Date.now())
 const liveMetricsMap = ref({})
 const listRequestInFlight = ref(false)
+const statsRequestInFlight = ref(false)
+const pageVisible = ref(typeof document === 'undefined' ? true : document.visibilityState === 'visible')
 let liveMetricsHydrationToken = 0
 const LIST_REFRESH_INTERVAL = 3000
 
@@ -482,6 +593,10 @@ const toggleBaseline = async (row) => {
   }
 }
 
+const canToggleBaseline = (row) => {
+  return row?.status !== 'running'
+}
+
 // 打开对比弹窗
 const openCompareDialog = async () => {
   if (selectedExecutions.value.length !== 2) {
@@ -537,6 +652,22 @@ const getStatusText = (status) => {
     completed_with_errors: '完成(部分失败)',
     completed_all_failed: '完成(全部失败)',
     completed_no_samples: '完成(无有效样本)',
+    process_failed: '执行失败',
+    failed: '失败',
+    stopped: '已停止'
+  }
+  return textMap[normalized] || normalized
+}
+
+const getStatusShortText = (status) => {
+  const normalized = typeof status === 'object' ? (status?.display_status || status?.status) : status
+  const textMap = {
+    running: '运行中',
+    success: '已完成',
+    completed_success: '全成功',
+    completed_with_errors: '部分失败',
+    completed_all_failed: '全失败',
+    completed_no_samples: '无样本',
     process_failed: '执行失败',
     failed: '失败',
     stopped: '已停止'
@@ -689,15 +820,22 @@ const hydrateRunningMetrics = async (rows) => {
 }
 
 // 获取执行统计
-const fetchStats = async () => {
-  statsLoading.value = true
+const fetchStats = async ({ background = false } = {}) => {
+  if (statsRequestInFlight.value) return
+  statsRequestInFlight.value = true
+  if (!background) {
+    statsLoading.value = true
+  }
   try {
     const res = await executionApi.getStats()
     stats.value = res.data || { total: 0, running: 0, completed: 0, failed: 0, stopped: 0 }
   } catch (error) {
     console.error('获取执行统计失败:', error)
   } finally {
-    statsLoading.value = false
+    statsRequestInFlight.value = false
+    if (!background) {
+      statsLoading.value = false
+    }
   }
 }
 
@@ -885,16 +1023,31 @@ const handleDelete = async (row) => {
 }
 
 // 设置自动刷新
+const refreshRunningSnapshot = async () => {
+  await fetchExecutions({ background: true })
+  await fetchStats({ background: true })
+}
+
 const setupAutoRefresh = () => {
   if (refreshTimer.value) {
-    clearInterval(refreshTimer.value)
+    clearTimeout(refreshTimer.value)
     refreshTimer.value = null
   }
-  refreshTimer.value = setInterval(() => {
-    if (hasRunning.value) {
-      fetchExecutions({ background: true })
+
+  const tick = async () => {
+    if (!pageVisible.value) {
+      refreshTimer.value = window.setTimeout(tick, LIST_REFRESH_INTERVAL)
+      return
     }
-  }, LIST_REFRESH_INTERVAL)
+
+    if (hasRunning.value) {
+      await refreshRunningSnapshot()
+    }
+
+    refreshTimer.value = window.setTimeout(tick, LIST_REFRESH_INTERVAL)
+  }
+
+  refreshTimer.value = window.setTimeout(tick, LIST_REFRESH_INTERVAL)
 }
 
 const setupClockTicker = () => {
@@ -908,12 +1061,20 @@ const setupClockTicker = () => {
   }, 1000)
 }
 
+const handleVisibilityChange = () => {
+  pageVisible.value = document.visibilityState === 'visible'
+  if (pageVisible.value && hasRunning.value) {
+    refreshRunningSnapshot()
+  }
+}
+
 onMounted(() => {
   fetchStats()
   fetchScripts()
   fetchExecutions()
   setupAutoRefresh()
   setupClockTicker()
+  document.addEventListener('visibilitychange', handleVisibilityChange)
 })
 
 // 监听 URL query 变化（从详情页返回时）
@@ -932,54 +1093,142 @@ watch(() => route.query, (newQuery) => {
 
 onUnmounted(() => {
   if (refreshTimer.value) {
-    clearInterval(refreshTimer.value)
+    clearTimeout(refreshTimer.value)
     refreshTimer.value = null
   }
   if (clockTimer.value) {
     clearInterval(clockTimer.value)
     clockTimer.value = null
   }
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 </script>
 
 <style scoped lang="scss">
 .execution-list-page {
-  padding: 20px;
+  padding: 6px 0 14px;
+}
+
+.workspace-hero {
+  margin-bottom: 12px;
+  padding: 16px 18px;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 32%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015)),
+    var(--bg-panel);
+  box-shadow: 0 22px 48px rgba(2, 8, 23, 0.12);
+}
+
+.workspace-hero-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.workspace-copy {
+  min-width: 0;
+
+  h1 {
+    margin: 6px 0 8px;
+    color: var(--text-primary);
+    font-size: 24px;
+    line-height: 1.15;
+  }
+
+  p {
+    max-width: 760px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+}
+
+.workspace-kicker {
+  color: var(--accent-blue);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.workspace-hero-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.workspace-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 // 统计卡片区
 .stats-section {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 16px;
-  margin-bottom: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
 }
 
 .stat-card {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 20px;
-  background: var(--bg-card);
+  gap: 14px;
+  width: 100%;
+  min-height: 84px;
+  padding: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015)),
+    var(--bg-card-elevated);
   border-radius: var(--radius-lg);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  box-shadow: 0 18px 40px rgba(2, 8, 23, 0.14);
   cursor: pointer;
   transition: all 0.25s ease;
+  appearance: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
 
   &:hover {
     border-color: rgba(255, 255, 255, 0.12);
     transform: translateY(-2px);
   }
+
+  &:focus-visible {
+    outline: 2px solid rgba(54, 191, 250, 0.85);
+    outline-offset: 2px;
+  }
+
+  &.active {
+    border-color: rgba(54, 191, 250, 0.4);
+    background:
+      linear-gradient(180deg, rgba(0, 170, 255, 0.09), rgba(0, 170, 255, 0.03)),
+      var(--bg-card);
+    box-shadow: inset 0 0 0 1px rgba(54, 191, 250, 0.12);
+  }
 }
 
 .stat-icon {
-  width: 48px;
-  height: 48px;
+  width: 42px;
+  height: 42px;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-md);
-  font-size: 22px;
+  font-size: 20px;
 
   &.total {
     background: rgba(0, 102, 255, 0.1);
@@ -1012,7 +1261,7 @@ onUnmounted(() => {
 }
 
 .stat-content .stat-value {
-  font-size: 28px;
+  font-size: 24px;
   font-weight: 700;
   font-family: 'Consolas', 'Monaco', monospace;
   color: var(--text-primary);
@@ -1020,48 +1269,74 @@ onUnmounted(() => {
 }
 
 .stat-content .stat-label {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-secondary);
   margin-top: 4px;
 }
 
 // 筛选区域
 .filter-section {
-  padding: 16px 24px;
-  margin-bottom: 20px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  background:
+    linear-gradient(180deg, rgba(56, 189, 248, 0.04), rgba(255, 255, 255, 0.015)),
+    var(--bg-panel);
+}
+
+.filter-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.filter-head-copy {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.6;
 }
 
 .filter-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(160px, 0.9fr) minmax(320px, 1.45fr) minmax(220px, 1fr) auto;
+  gap: 10px;
   align-items: center;
 }
 
 .filter-select {
-  width: 160px;
+  width: 100%;
+  min-width: 0;
 }
 
 .filter-date {
-  width: 260px;
+  width: 100%;
+  min-width: 0;
 }
 
 .filter-input {
-  width: 180px;
+  width: 100%;
+  min-width: 0;
 }
 
 .filter-buttons {
   display: flex;
   gap: 8px;
-  margin-left: auto;
+  margin-left: 0;
+  justify-content: flex-end;
+  flex-wrap: wrap;
 }
 
 // 区域卡片
 .section-card {
-  background: var(--bg-card);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015)),
+    var(--bg-panel);
   border-radius: var(--radius-lg);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  padding: 24px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  padding: 16px;
+  box-shadow: 0 22px 48px rgba(2, 8, 23, 0.12);
 }
 
 // 区域标签
@@ -1076,25 +1351,37 @@ onUnmounted(() => {
 
 .section-title {
   color: var(--text-primary);
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
   margin-bottom: 4px;
+}
+
+.section-desc {
+  max-width: 720px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .section-header-with-action {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 20px;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
 
   .section-header {
     flex: 1;
+    min-width: 0;
   }
 
   .section-actions {
     display: flex;
     gap: 12px;
     align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
   }
 }
 
@@ -1103,7 +1390,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
+  padding: 5px 10px;
   background: rgba(0, 102, 255, 0.1);
   border: 1px solid rgba(0, 102, 255, 0.2);
   border-radius: var(--radius-full);
@@ -1127,9 +1414,30 @@ onUnmounted(() => {
   color: var(--accent-blue);
 }
 
+.list-utility-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.utility-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .refresh-btn {
   border-radius: var(--radius-md);
-  padding: 10px 20px;
+  padding: 8px 16px;
   background: transparent;
   border: 1px solid rgba(255, 255, 255, 0.2);
   color: var(--text-primary);
@@ -1139,19 +1447,42 @@ onUnmounted(() => {
   }
 }
 
+.execution-table-shell {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px;
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.01)),
+    rgba(15, 23, 42, 0.52);
+  border: 1px solid rgba(148, 163, 184, 0.08);
+}
+
 // 执行记录表格
 .executions-table {
   background: transparent;
   border-radius: var(--radius-lg);
   overflow: hidden;
+  min-width: 1288px;
+  border: 1px solid rgba(148, 163, 184, 0.08);
+
+  :deep(.el-table__fixed-right::before) {
+    display: none;
+  }
+
+  :deep(.el-table__body-wrapper) {
+    scrollbar-width: thin;
+  }
 
   :deep(.el-table__header-wrapper) {
     th.el-table__cell {
-      background-color: rgba(255, 255, 255, 0.03) !important;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018)) !important;
       color: var(--text-secondary) !important;
       font-weight: 500 !important;
       font-size: 13px !important;
       border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
+      height: 46px;
     }
   }
 
@@ -1161,34 +1492,63 @@ onUnmounted(() => {
     td.el-table__cell {
       border-bottom: 1px solid rgba(255, 255, 255, 0.04) !important;
       color: var(--text-primary) !important;
+      padding-top: 10px;
+      padding-bottom: 10px;
     }
   }
 
   :deep(.el-table__row) {
     background-color: var(--bg-card);
+    transition: background-color 0.2s ease, box-shadow 0.2s ease;
 
     &:hover {
-      background-color: rgba(255, 255, 255, 0.02) !important;
+      background:
+        linear-gradient(90deg, rgba(56, 189, 248, 0.03), rgba(255, 255, 255, 0.015)) !important;
     }
+  }
+
+  :deep(.action-column-header .cell) {
+    justify-content: center;
+    text-align: center;
+  }
+
+  :deep(.action-column .cell) {
+    padding-left: 6px;
+    padding-right: 6px;
   }
 
   .script-name-cell {
     display: flex;
     align-items: center;
     gap: 10px;
+    min-width: 0;
 
     .script-icon {
       font-size: 18px;
       color: var(--accent-blue);
+      flex-shrink: 0;
     }
+  }
 
-    .script-name {
+  .script-name-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .script-name {
       color: var(--text-primary);
-      font-weight: 500;
+      font-weight: 600;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-    }
+  }
+
+  .script-id {
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-family: 'Consolas', 'Monaco', monospace;
   }
 
   .index-text {
@@ -1210,12 +1570,19 @@ onUnmounted(() => {
   }
 
   .remarks-text {
-    color: var(--text-secondary);
-    font-size: 13px;
+    display: none;
   }
 
   .status-tag {
-    font-weight: 500;
+    font-weight: 600;
+    max-width: 112px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-inline: 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    min-height: 28px;
   }
 
   .metric-with-unit {
@@ -1223,6 +1590,7 @@ onUnmounted(() => {
     align-items: baseline;
     justify-content: flex-end;
     gap: 4px;
+    min-width: 0;
   }
 
   .metric-value {
@@ -1249,24 +1617,76 @@ onUnmounted(() => {
     font-weight: 400;
   }
 
+  .remarks-trigger {
+    width: 30px;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    background: rgba(255, 255, 255, 0.04);
+    color: #f8fafc;
+    cursor: pointer;
+    transition: all 0.2s ease;
+
+    &:hover {
+      border-color: rgba(56, 189, 248, 0.22);
+      color: #38bdf8;
+      background: rgba(56, 189, 248, 0.08);
+    }
+
+    &.empty {
+      color: var(--text-secondary);
+      opacity: 0.55;
+    }
+  }
+
   .action-btns {
     display: flex;
+    justify-content: center;
     gap: 4px;
     flex-wrap: nowrap;
-    overflow: hidden;
+    overflow: visible;
+    padding: 4px 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.05);
 
     .action-btn {
-      padding: 4px 8px;
-      font-size: 13px;
+      margin: 0;
+      min-width: auto;
+      white-space: nowrap;
+      border-radius: 999px;
 
       .el-icon {
-        margin-right: 4px;
         font-size: 14px;
+      }
+    }
+
+    .action-icon {
+      width: 30px;
+      height: 30px;
+      padding: 0;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.045);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      transition: transform 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
+
+      .el-icon {
+        margin-right: 0;
+        font-size: 13px;
+      }
+
+      &:hover {
+        transform: translateY(-1px);
       }
     }
 
     .view-btn {
       color: var(--accent-blue);
+      background: rgba(56, 189, 248, 0.08);
+      border-color: rgba(56, 189, 248, 0.14);
     }
 
     .stop-btn {
@@ -1280,47 +1700,65 @@ onUnmounted(() => {
     .delete-btn:hover {
       color: #ff5c52 !important;
     }
-    
+
     .baseline-btn {
       color: #eab308;
+      background: rgba(234, 179, 8, 0.06);
+      border-color: rgba(234, 179, 8, 0.14);
     }
-    
+
     .baseline-btn:hover {
       color: #facc15;
+      background: rgba(234, 179, 8, 0.12);
     }
   }
 }
 
 // 响应式
 @media (max-width: 1400px) {
-  .stats-section {
-    grid-template-columns: repeat(3, 1fr);
+  .filter-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .workspace-hero-main {
+    flex-direction: column;
+  }
+
+  .workspace-hero-pills {
+    justify-content: flex-start;
+  }
+
+  .filter-buttons {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
   }
 }
 
 @media (max-width: 1024px) {
-  .stats-section {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
   .filter-bar {
-    .filter-select,
-    .filter-date,
-    .filter-input {
-      width: 100%;
-    }
-  }
-
-  .filter-buttons {
-    width: 100%;
-    margin-left: 0;
-    justify-content: flex-end;
+    grid-template-columns: 1fr;
   }
 }
 
 @media (max-width: 768px) {
-  .stats-section {
-    grid-template-columns: 1fr;
+  .workspace-hero {
+    padding: 18px;
+  }
+
+  .workspace-copy h1 {
+    font-size: 24px;
+  }
+
+  .filter-head {
+    align-items: flex-start;
+  }
+
+  .section-card {
+    padding: 18px;
+  }
+
+  .list-utility-bar {
+    margin-bottom: 12px;
   }
 }
 
@@ -1330,37 +1768,37 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 60px 20px;
+  padding: 40px 16px;
   background: var(--bg-secondary);
   border-radius: var(--radius-lg);
-  margin-top: 20px;
+  margin-top: 14px;
 
   .empty-icon {
-    width: 80px;
-    height: 80px;
+    width: 68px;
+    height: 68px;
     border-radius: 50%;
     background: linear-gradient(135deg, rgba(0, 212, 255, 0.1), rgba(0, 102, 255, 0.1));
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-bottom: 16px;
+    margin-bottom: 12px;
 
     .el-icon {
-      font-size: 40px;
+      font-size: 34px;
       color: var(--accent-blue);
       opacity: 0.6;
     }
   }
 
   .empty-title {
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 500;
     color: var(--text-primary);
     margin-bottom: 8px;
   }
 
   .empty-desc {
-    font-size: 14px;
+    font-size: 13px;
     color: var(--text-secondary);
   }
 }
@@ -1369,7 +1807,7 @@ onUnmounted(() => {
 .pagination-wrapper {
   display: flex;
   justify-content: center;
-  margin-top: 24px;
+  margin-top: 18px;
 }
 
 // 对比按钮

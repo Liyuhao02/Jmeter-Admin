@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"jmeter-admin/config"
@@ -143,6 +144,34 @@ func CheckSlave(c *gin.Context) {
 	}))
 }
 
+func GetSlavePreflight(c *gin.Context) {
+	masterHost := strings.TrimSpace(c.Query("master_host"))
+	rawIDs := strings.TrimSpace(c.Query("ids"))
+	var slaveIDs []int64
+	if rawIDs != "" {
+		for _, part := range strings.Split(rawIDs, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			id, err := strconv.ParseInt(part, 10, 64)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, model.Error("无效的 Slave ID"))
+				return
+			}
+			slaveIDs = append(slaveIDs, id)
+		}
+	}
+
+	report, err := service.GetSlavePreflightReport(slaveIDs, masterHost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error(err.Error()))
+		return
+	}
+
+	c.JSON(http.StatusOK, model.Success(report))
+}
+
 // GetNetworkInterfaces 获取本机网卡 IP 列表
 func GetNetworkInterfaces(c *gin.Context) {
 	interfaces, err := net.Interfaces()
@@ -259,7 +288,22 @@ func GetHeartbeatStatus(c *gin.Context) {
 		})
 	}
 
+	masterHost := config.GlobalConfig.JMeter.MasterHostname
+	if masterHost == "" {
+		masterHost = "localhost"
+	}
+
 	c.JSON(http.StatusOK, model.Success(gin.H{
+		"master": gin.H{
+			"id":            0,
+			"name":          "Master",
+			"host":          masterHost,
+			"status":        "online",
+			"agent_status":  "online",
+			"system_stats":  collectMasterSystemStats(),
+			"agent_uptime":  0,
+			"last_check_time": time.Now().Format("2006-01-02 15:04:05"),
+		},
 		"slaves":          heartbeatList,
 		"check_interval":  30,
 		"last_check_time": time.Now().Format("2006-01-02 15:04:05"),
