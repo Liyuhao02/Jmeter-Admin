@@ -698,13 +698,16 @@ onMounted(() => {
 // 区域卡片
 .section-card {
   background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.08), transparent 34%),
     linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015)),
     var(--bg-panel);
   border-radius: var(--radius-lg);
   border: 1px solid rgba(148, 163, 184, 0.12);
   padding: 16px;
   margin-bottom: 12px;
-  box-shadow: 0 22px 48px rgba(2, 8, 23, 0.12);
+  box-shadow:
+    0 22px 48px rgba(2, 8, 23, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 // 区域标签

@@ -1,4 +1,4 @@
-.PHONY: build-frontend build-backend build-all clean run build-linux dev dev-backend dev-frontend
+.PHONY: build-frontend build-backend build-all clean clean-share run build-linux dev dev-backend dev-frontend
 
 # 构建前端
 build-frontend:
@@ -22,6 +22,12 @@ build-linux:
 clean:
 	rm -f jmeter-admin jmeter-agent
 	rm -rf web/dist
+
+# 打包/分享前清理本地产物和运行数据
+clean-share:
+	rm -f jmeter-admin jmeter-agent jmeter.log *.out config.yaml
+	rm -rf .gocache temp data uploads results web/dist web/node_modules web/.vite
+	find . -name '.DS_Store' -delete
 
 # 运行
 run:

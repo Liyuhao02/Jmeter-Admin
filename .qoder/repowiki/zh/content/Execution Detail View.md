@@ -19,11 +19,13 @@
 
 ## 更新摘要
 **变更内容**
-- 新增执行结论系统，提供智能的测试结果分析和建议
-- 新增接口级统计分析，包括样本最多、平均最慢、错误最多接口识别
-- 新增执行链路时间轴，展示测试执行的完整流程
-- 新增基准线对比功能，支持历史结果对比分析
-- 增强UI组件设计，提供更好的用户体验
+- 执行详情视图进行了重大重构，界面结构完全重新设计
+- 新增诊断区域，提供执行链路体征分析
+- 新增拓扑可视化，展示分布式链路状态
+- 新增时间线分析，追踪执行关键阶段
+- 新增采样器分析，提供接口维度统计
+- 新增节点监控，实时监控分布式执行节点
+- 采用新的布局结构，支持左侧目录导航
 
 ## 目录
 1. [项目概述](#项目概述)
@@ -41,7 +43,7 @@
 
 执行详情视图是 JMeter Admin 系统中的核心功能模块，为用户提供全面的测试执行监控和分析能力。该视图为用户提供了从多个维度监控测试执行状态的能力，包括实时指标、错误分析、节点监控、报告生成、执行结论分析等。
 
-该视图采用现代化的前端技术栈构建，结合后端服务实现了完整的测试执行生命周期管理。用户可以通过直观的界面实时监控测试执行状态，分析测试结果，并进行相应的操作。最新的更新增加了智能的执行结论系统和接口级统计分析功能，进一步提升了测试分析的智能化水平。
+经过重大重构后，执行详情视图采用了全新的界面设计和功能布局，提供了更加直观和高效的测试执行监控体验。新版本将传统的单一页面布局重构为模块化的区域划分，每个功能区域都有明确的标签和职责分工。
 
 ## 项目结构
 
@@ -55,28 +57,31 @@ B[ExecutionDetail.vue]
 C[MetricTrendChart.vue]
 D[API 层]
 E[样式系统]
+F[左侧目录导航]
 end
 subgraph "后端层"
-F[Gin Web 框架]
-G[Execution Handler]
-H[Execution Service]
-I[数据库层]
+G[Gin Web 框架]
+H[Execution Handler]
+I[Execution Service]
+J[数据库层]
 end
 subgraph "数据分析层"
-J[执行结论引擎]
-K[接口统计分析]
-L[基准线对比]
+K[执行结论引擎]
+L[接口统计分析]
+M[基准线对比]
+N[节点监控系统]
 end
 A --> E
 B --> D
 C --> D
-D --> F
-F --> G
+D --> G
 G --> H
 H --> I
-H --> J
-H --> K
-H --> L
+I --> J
+I --> K
+I --> L
+I --> M
+I --> N
 ```
 
 **图表来源**
@@ -107,6 +112,8 @@ class ExecutionDetail {
 +samplerStats : Array
 +timelineStages : Array
 +baselineComparison : Object
++diagnosticCards : Array
++distributedTopologyRows : Array
 +fetchExecutionDetail()
 +fetchLiveMetrics()
 +fetchErrors()
@@ -143,6 +150,8 @@ class ExecutionHandler {
 +DownloadResultFile()
 +DownloadReport()
 +DownloadErrors()
++GetExecutionStream()
++GetExecutionLog()
 }
 ExecutionDetail --> MetricTrendChart : uses
 ExecutionDetail --> ExecutionAPI : calls
@@ -156,16 +165,16 @@ ExecutionAPI --> ExecutionHandler : delegates
 
 ### 关键功能特性
 
-1. **智能执行结论**: 自动生成测试结果分析和建议
-2. **接口级统计**: 提供样本数、响应时间、错误率等多维度接口分析
-3. **执行链路追踪**: 展示测试执行的完整流程和关键节点
-4. **基准线对比**: 支持与历史执行结果的对比分析
-5. **实时监控**: 通过 SSE 流式传输获取实时执行状态
-6. **多维度分析**: 提供吞吐量、延迟、错误率等关键指标
-7. **错误深度分析**: 支持详细的错误记录和响应分析
-8. **节点监控**: 实时监控分布式执行节点的系统状态
-9. **报告生成**: 支持 HTML 报告的生成和下载
-10. **文件管理**: 提供多种格式的结果文件下载
+1. **诊断区域**: 提供执行链路体征分析，包括执行模式、结果链路、HTTP明细等状态
+2. **拓扑可视化**: 展示Master、Slave节点的分布式链路状态和回传情况
+3. **时间线分析**: 追踪从创建任务到结果落盘的完整执行流程
+4. **采样器分析**: 提供接口维度的统计分析，包括热点接口、慢接口、错误接口
+5. **节点监控**: 实时监控分布式执行节点的CPU、内存、磁盘、连接数等资源状态
+6. **智能执行结论**: 自动生成测试结果分析和建议
+7. **接口级统计**: 提供样本数、响应时间、错误率等多维度接口分析
+8. **基准线对比**: 支持与历史执行结果的对比分析
+9. **实时监控**: 通过 SSE 流式传输获取实时执行状态
+10. **多维度分析**: 提供吞吐量、延迟、错误率等关键指标
 
 **章节来源**
 - [ExecutionDetail.vue:1200-1600](file://web/src/views/ExecutionDetail.vue#L1200-1600)
@@ -191,7 +200,8 @@ S->>D : 查询执行记录
 D-->>S : 返回执行数据
 S->>S : 生成执行结论
 S->>S : 分析接口统计数据
-S-->>H : 执行详情 + 结论
+S->>S : 收集节点监控数据
+S-->>H : 执行详情 + 结论 + 监控
 H-->>A : JSON 响应
 A-->>V : 执行详情数据
 V->>U : 渲染页面
@@ -265,6 +275,8 @@ class ExecutionDetail {
 -samplerStats : Ref~Array~
 -timelineStages : Ref~Array~
 -baselineComparison : Ref~Object~
+-diagnosticCards : Ref~Array~
+-distributedTopologyRows : Ref~Array~
 -loading : Ref~Boolean~
 -stopping : Ref~Boolean~
 +fetchExecutionDetail()
@@ -282,7 +294,9 @@ class ComputedProperties {
 +hasReportDir : ComputedRef~Boolean~
 +hasErrors : ComputedRef~Boolean~
 +isExecutionRunning : ComputedRef~Boolean~
-+diagnostics : ComputedRef~Object~
++diagnosticCards : ComputedRef~Array~
++diagnosticWarnings : ComputedRef~Array~
++distributedTopologyRows : ComputedRef~Array~
 +executionConclusion : ComputedRef~Object~
 +conclusionHighlights : ComputedRef~Array~
 +conclusionRecommendations : ComputedRef~Array~
@@ -290,6 +304,7 @@ class ComputedProperties {
 +displaySamplerStats : ComputedRef~Array~
 +samplerOverviewCards : ComputedRef~Array~
 +timelineStages : ComputedRef~Array~
++detailNavItems : ComputedRef~Array~
 }
 class Methods {
 +fetchLog()
@@ -300,6 +315,8 @@ class Methods {
 +downloadReport()
 +downloadErrors()
 +downloadAll()
++scrollToDetailSection()
++openExpandedChart()
 }
 ExecutionDetail --> ComputedProperties
 ExecutionDetail --> Methods
@@ -543,6 +560,310 @@ end
 
 ## 新增功能详解
 
+### 诊断区域
+
+诊断区域是本次重构新增的核心功能，提供了执行链路的体征分析：
+
+#### 诊断卡片数据结构
+
+```mermaid
+erDiagram
+DIAGNOSTIC_CARD {
+string key PK
+string label
+string value
+string caption
+string color
+}
+DIAGNOSTIC_WARNING {
+string warning_text PK
+}
+EXECUTION_DIAGNOSTICS {
+string mode
+string result_merge_ready
+string detail_state
+array result_files
+array received_detail_sources
+array expected_detail_sources
+array missing_detail_sources
+array warnings
+}
+EXECUTION_DIAGNOSTICS ||--o{ DIAGNOSTIC_CARD : generates
+EXECUTION_DIAGNOSTICS ||--o{ DIAGNOSTIC_WARNING : contains
+```
+
+**图表来源**
+- [ExecutionDetail.vue:2085-2174](file://web/src/views/ExecutionDetail.vue#L2085-2174)
+- [ExecutionDetail.vue:2176-2178](file://web/src/views/ExecutionDetail.vue#L2176-2178)
+
+#### 诊断分析逻辑
+
+系统根据执行配置自动生成诊断卡片：
+
+```mermaid
+flowchart TD
+A[获取执行诊断信息] --> B{检查执行模式}
+B --> |local| C[生成本地执行卡片]
+B --> |distributed| D[生成分布式执行卡片]
+B --> |distributed_with_master| E[生成Master+Slave卡片]
+C --> F[检查结果链路状态]
+D --> F
+E --> F
+F --> G{检查HTTP明细状态}
+G --> |enabled| H[生成明细采集卡片]
+G --> |disabled| I[生成明细未开启卡片]
+H --> J[检查依赖状态]
+I --> J
+J --> K[生成依赖概况卡片]
+K --> L[检查回调链路]
+L --> M[生成回调链路卡片]
+M --> N[生成诊断警告]
+N --> O[渲染诊断区域]
+```
+
+**图表来源**
+- [ExecutionDetail.vue:2085-2174](file://web/src/views/ExecutionDetail.vue#L2085-2174)
+- [ExecutionDetail.vue:2176-2178](file://web/src/views/ExecutionDetail.vue#L2176-2178)
+
+**章节来源**
+- [ExecutionDetail.vue:237-266](file://web/src/views/ExecutionDetail.vue#L237-266)
+- [ExecutionDetail.vue:2085-2178](file://web/src/views/ExecutionDetail.vue#L2085-2178)
+
+### 拓扑可视化
+
+拓扑可视化功能展示了分布式执行的链路状态：
+
+#### 分布式拓扑数据结构
+
+```mermaid
+erDiagram
+TOPOLOGY_NODE {
+string key PK
+string role
+string name
+string status
+string note
+string foot
+string tone
+}
+TOPOLOGY_STATE {
+string received_detail_sources
+string missing_detail_sources
+string save_http_details
+string mode
+}
+TOPOLOGY_NODE ||--o{ TOPOLOGY_STATE : belongs_to
+```
+
+**图表来源**
+- [ExecutionDetail.vue:2206-2280](file://web/src/views/ExecutionDetail.vue#L2206-2280)
+- [ExecutionDetail.vue:2282-2289](file://web/src/views/ExecutionDetail.vue#L2282-2289)
+
+#### 拓扑状态判断逻辑
+
+```mermaid
+flowchart TD
+A[获取拓扑信息] --> B{检查HTTP明细状态}
+B --> |未开启| C[状态: 未开启]
+B --> |已开启| D{检查明细回传状态}
+D --> |已回传| E[状态: 已回传]
+D --> |部分回传| F[状态: 部分回传]
+D --> |缺失| G{检查执行状态}
+G --> |running| H[状态: 等待中]
+G --> |completed| I[状态: 缺失]
+C --> J[生成拓扑卡片]
+E --> J
+F --> J
+H --> J
+I --> J
+J --> K[渲染拓扑网格]
+```
+
+**图表来源**
+- [ExecutionDetail.vue:2214-2250](file://web/src/views/ExecutionDetail.vue#L2214-2250)
+- [ExecutionDetail.vue:2252-2277](file://web/src/views/ExecutionDetail.vue#L2252-2277)
+
+**章节来源**
+- [ExecutionDetail.vue:268-314](file://web/src/views/ExecutionDetail.vue#L268-314)
+- [ExecutionDetail.vue:2206-2280](file://web/src/views/ExecutionDetail.vue#L2206-2280)
+
+### 时间线分析
+
+时间线分析功能追踪了执行的完整流程：
+
+#### 时间线阶段数据结构
+
+```mermaid
+erDiagram
+TIMELINE_STAGE {
+string key PK
+string step
+string name
+string time
+string description
+string tone
+}
+EXECUTION_TIMELINE {
+int execution_id PK
+array stages
+}
+EXECUTION_TIMELINE ||--o{ TIMELINE_STAGE : contains
+```
+
+**图表来源**
+- [ExecutionDetail.vue:2341-2408](file://web/src/views/ExecutionDetail.vue#L2341-2408)
+- [ExecutionDetail.vue:2410-2418](file://web/src/views/ExecutionDetail.vue#L2410-2418)
+
+#### 时间线生成逻辑
+
+```mermaid
+flowchart TD
+A[获取执行信息] --> B[创建任务阶段]
+B --> C{检查开始时间}
+C --> |存在| D[开始执行阶段]
+C --> |不存在| E[跳过]
+D --> F{检查运行时脚本}
+F --> |存在| G[生成运行时脚本阶段]
+F --> |不存在| H[跳过]
+G --> I{检查HTTP明细}
+I --> |开启| J[错误明细回传阶段]
+I --> |关闭| K[跳过]
+J --> L[结果落盘阶段]
+K --> L
+L --> M[渲染时间线卡片]
+```
+
+**图表来源**
+- [ExecutionDetail.vue:2357-2396](file://web/src/views/ExecutionDetail.vue#L2357-2396)
+- [ExecutionDetail.vue:2398-2407](file://web/src/views/ExecutionDetail.vue#L2398-2407)
+
+**章节来源**
+- [ExecutionDetail.vue:352-379](file://web/src/views/ExecutionDetail.vue#L352-379)
+- [ExecutionDetail.vue:2341-2408](file://web/src/views/ExecutionDetail.vue#L2341-2408)
+
+### 采样器分析
+
+采样器分析提供了接口维度的统计分析：
+
+#### 采样器统计数据结构
+
+```mermaid
+erDiagram
+SAMPLER_STAT {
+string label PK
+string url
+int count
+int error
+float error_rate
+float avg_rt
+float p95
+float p99
+float throughput
+}
+SAMPLER_OVERVIEW_CARD {
+string key PK
+string label
+string name
+string value
+string caption
+}
+SAMPLER_STAT ||--o{ SAMPLER_OVERVIEW_CARD : analyzed
+```
+
+**图表来源**
+- [ExecutionDetail.vue:2304-2339](file://web/src/views/ExecutionDetail.vue#L2304-2339)
+- [ExecutionDetail.vue:2311-2339](file://web/src/views/ExecutionDetail.vue#L2311-2339)
+
+#### 接口分析算法
+
+系统自动识别关键接口：
+
+```mermaid
+flowchart TD
+A[获取接口统计数据] --> B[样本最多接口]
+B --> C[比较count字段]
+C --> D[记录最高样本接口]
+D --> E[平均最慢接口]
+E --> F[比较avg_rt字段]
+F --> G[记录最高RT接口]
+G --> H[错误最多接口]
+H --> I[比较error字段]
+I --> J[记录最高错误接口]
+J --> K[生成概览卡片]
+K --> L[渲染接口表格]
+```
+
+**图表来源**
+- [ExecutionDetail.vue:2313-2339](file://web/src/views/ExecutionDetail.vue#L2313-2339)
+- [ExecutionDetail.vue:2304-2339](file://web/src/views/ExecutionDetail.vue#L2304-2339)
+
+**章节来源**
+- [ExecutionDetail.vue:381-430](file://web/src/views/ExecutionDetail.vue#L381-430)
+- [ExecutionDetail.vue:2304-2339](file://web/src/views/ExecutionDetail.vue#L2304-2339)
+
+### 节点监控
+
+节点监控功能实时监控分布式执行节点的状态：
+
+#### 节点监控数据结构
+
+```mermaid
+erDiagram
+NODE_METRIC {
+int id
+string name
+string host
+string role
+boolean online
+string agent_status
+string participating
+object system_stats
+}
+NODE_STATS {
+object cpu
+object memory
+object disk
+object network
+}
+NODE_METRIC ||--o{ NODE_STATS : has
+```
+
+**图表来源**
+- [ExecutionDetail.vue:2752-2931](file://web/src/views/ExecutionDetail.vue#L2752-2931)
+- [ExecutionDetail.vue:2917-2931](file://web/src/views/ExecutionDetail.vue#L2917-2931)
+
+#### 节点监控逻辑
+
+```mermaid
+flowchart TD
+A[获取节点指标] --> B{检查执行状态}
+B --> |running| C[开始轮询监控]
+B --> |completed| D[停止轮询]
+C --> E[收集Master指标]
+E --> F[收集Slave指标]
+F --> G[更新节点状态]
+G --> H[渲染节点卡片]
+H --> I{检查资源使用率}
+I --> |CPU>90%| J[标记红色警告]
+I --> |内存>90%| K[标记红色警告]
+I --> |磁盘>90%| L[标记红色警告]
+I --> |正常| M[标记绿色正常]
+J --> N[更新节点状态]
+K --> N
+L --> N
+M --> N
+N --> O[重新渲染]
+O --> C
+```
+
+**图表来源**
+- [ExecutionDetail.vue:2752-2931](file://web/src/views/ExecutionDetail.vue#L2752-2931)
+- [ExecutionDetail.vue:2917-2931](file://web/src/views/ExecutionDetail.vue#L2917-2931)
+
+**章节来源**
+- [ExecutionDetail.vue:432-527](file://web/src/views/ExecutionDetail.vue#L432-527)
+- [ExecutionDetail.vue:2752-2931](file://web/src/views/ExecutionDetail.vue#L2752-2931)
+
 ### 执行结论系统
 
 执行结论系统是本次更新的核心功能，提供了智能的测试结果分析和建议：
@@ -601,121 +922,8 @@ L --> M[渲染结论面板]
 - [execution.go:2066-2102](file://internal/service/execution.go#L2066-2102)
 
 **章节来源**
-- [ExecutionDetail.vue:180-210](file://web/src/views/ExecutionDetail.vue#L180-210)
+- [ExecutionDetail.vue:316-350](file://web/src/views/ExecutionDetail.vue#L316-350)
 - [execution.go:2032-2111](file://internal/service/execution.go#L2032-2111)
-
-### 接口级统计分析
-
-接口级统计分析提供了多维度的接口性能分析：
-
-#### 接口统计数据结构
-
-```mermaid
-erDiagram
-SAMPLER_STAT {
-string label PK
-string url
-int count
-int error
-float error_rate
-float avg_rt
-float p95
-float p99
-float throughput
-}
-SAMPLER_OVERVIEW_CARD {
-string key PK
-string label
-string name
-string value
-string caption
-}
-SAMPLER_STAT ||--o{ SAMPLER_OVERVIEW_CARD : analyzed
-```
-
-**图表来源**
-- [ExecutionDetail.vue:1509-1544](file://web/src/views/ExecutionDetail.vue#L1509-1544)
-- [ExecutionDetail.vue:227-259](file://web/src/views/ExecutionDetail.vue#L227-259)
-
-#### 接口分析算法
-
-系统自动识别关键接口：
-
-```mermaid
-flowchart TD
-A[获取接口统计数据] --> B[样本最多接口]
-B --> C[比较count字段]
-C --> D[记录最高样本接口]
-D --> E[平均最慢接口]
-E --> F[比较avg_rt字段]
-F --> G[记录最高RT接口]
-G --> H[错误最多接口]
-H --> I[比较error字段]
-I --> J[记录最高错误接口]
-J --> K[生成概览卡片]
-K --> L[渲染接口表格]
-```
-
-**图表来源**
-- [ExecutionDetail.vue:1516-1544](file://web/src/views/ExecutionDetail.vue#L1516-1544)
-- [execution.go:2085-2102](file://internal/service/execution.go#L2085-2102)
-
-**章节来源**
-- [ExecutionDetail.vue:227-259](file://web/src/views/ExecutionDetail.vue#L227-259)
-- [execution.go:2085-2102](file://internal/service/execution.go#L2085-2102)
-
-### 执行链路时间轴
-
-执行链路时间轴展示了测试执行的完整流程：
-
-#### 时间轴数据结构
-
-```mermaid
-erDiagram
-TIMELINE_STAGE {
-string key PK
-string step
-string name
-string time
-string description
-string tone
-}
-EXECUTION_TIMELINE {
-int execution_id PK
-array stages
-}
-EXECUTION_TIMELINE ||--o{ TIMELINE_STAGE : contains
-```
-
-**图表来源**
-- [ExecutionDetail.vue:1546-1600](file://web/src/views/ExecutionDetail.vue#L1546-1600)
-- [ExecutionDetail.vue:212-225](file://web/src/views/ExecutionDetail.vue#L212-225)
-
-#### 时间轴生成逻辑
-
-```mermaid
-flowchart TD
-A[获取执行信息] --> B[创建创建任务阶段]
-B --> C{检查开始时间}
-C --> |存在| D[创建开始执行阶段]
-C --> |不存在| E[跳过]
-D --> F{检查运行时脚本}
-F --> |存在| G[创建生成运行时脚本阶段]
-F --> |不存在| H[跳过]
-G --> I{检查HTTP明细}
-I --> |开启| J[创建错误明细回传阶段]
-I --> |关闭| K[跳过]
-J --> L[创建结束阶段]
-K --> L
-L --> M[渲染时间轴卡片]
-```
-
-**图表来源**
-- [ExecutionDetail.vue:1546-1600](file://web/src/views/ExecutionDetail.vue#L1546-1600)
-- [ExecutionDetail.vue:212-225](file://web/src/views/ExecutionDetail.vue#L212-225)
-
-**章节来源**
-- [ExecutionDetail.vue:212-225](file://web/src/views/ExecutionDetail.vue#L212-225)
 
 ### 基准线对比功能
 
@@ -765,7 +973,7 @@ H --> I[渲染基准线对比]
 - [execution.js:88-91](file://web/src/api/execution.js#L88-91)
 
 **章节来源**
-- [ExecutionDetail.vue:88-121](file://web/src/views/ExecutionDetail.vue#L88-121)
+- [ExecutionDetail.vue:165-198](file://web/src/views/ExecutionDetail.vue#L165-198)
 - [execution.js:84-91](file://web/src/api/execution.js#L84-91)
 
 ## 依赖关系分析
@@ -780,32 +988,34 @@ B[Element Plus]
 C[axios]
 D[EventSource Polyfill]
 E[SCSS]
+F[左侧目录导航]
 end
 subgraph "后端依赖"
-F[Gin]
-G[gopsutil]
-H[sqlx]
-I[encoding/csv]
+G[Gin]
+H[gopsutil]
+I[sqlx]
+J[encoding/csv]
 end
 subgraph "工具库"
-J[shirou/gopsutil]
-K[go-sqlite3]
-L[go-file]
-M[go-zip]
-N[jmxRisk.js]
+K[shirou/gopsutil]
+L[go-sqlite3]
+M[go-file]
+N[go-zip]
+O[jmxRisk.js]
 end
 A --> B
 A --> C
 A --> D
 A --> E
-F --> G
-F --> H
-F --> I
+A --> F
+G --> H
+G --> I
 G --> J
 H --> K
 I --> L
-I --> M
-A --> N
+J --> M
+J --> N
+A --> O
 ```
 
 **图表来源**
@@ -834,6 +1044,7 @@ N --> O[Server-Sent Events]
 P[CSV 处理] --> Q[encoding/csv]
 R[JMX 解析] --> S[jmx_csv.go]
 T[风险分析] --> U[jmxRisk.js]
+V[节点监控] --> W[gopsutil]
 ```
 
 **图表来源**
@@ -857,6 +1068,7 @@ T[风险分析] --> U[jmxRisk.js]
 3. **虚拟滚动**: 对大量日志和错误记录采用虚拟滚动
 4. **防抖处理**: 对频繁的用户操作进行防抖处理
 5. **智能结论生成**: 在后端进行复杂的分析计算，前端只负责展示
+6. **节点监控轮询**: 优化节点指标轮询频率，避免过度请求
 
 ### 内存管理
 
@@ -888,6 +1100,7 @@ M --> N[优化内存使用]
 3. **缓存策略**: 实现智能缓存机制
 4. **错误重试**: 实现指数退避重试机制
 5. **SSE 优化**: 实现智能的事件流处理
+6. **节点监控优化**: 3秒间隔更新节点指标，避免频繁请求
 
 ## 故障排除指南
 
@@ -901,6 +1114,15 @@ M --> N[优化内存使用]
 | 日志流中断 | 服务器重启 | 自动重连机制会恢复连接 |
 | 数据延迟 | 网络延迟 | 调整刷新频率，检查服务器性能 |
 | 执行结论不显示 | 分析计算失败 | 检查后端服务，查看错误日志 |
+| 节点监控异常 | Agent 离线 | 检查 Slave Agent 状态和网络连接 |
+
+#### 诊断区域问题
+
+| 问题描述 | 可能原因 | 解决方案 |
+|---------|---------|---------|
+| 诊断卡片为空 | 执行配置缺失 | 检查执行配置，确认诊断信息生成 |
+| 拓扑状态异常 | 明细回传失败 | 检查回调链路配置，确认节点可达性 |
+| 诊断警告过多 | 环境配置问题 | 检查执行环境，查看警告详情 |
 
 #### 错误分析问题
 
@@ -924,10 +1146,11 @@ M --> N[优化内存使用]
 
 | 问题描述 | 可能原因 | 解决方案 |
 |---------|---------|---------|
-| 执行结论异常 | 分析算法错误 | 检查后端服务，验证指标数据 |
-| 接口统计不准确 | 数据聚合错误 | 检查 JTL 文件格式，验证统计逻辑 |
-| 时间轴显示异常 | 执行时间缺失 | 检查执行记录，确认时间戳信息 |
-| 基准线对比失败 | 历史数据不兼容 | 检查执行配置，确认数据结构一致 |
+| 诊断区域异常 | 诊断信息解析失败 | 检查后端服务，验证诊断数据格式 |
+| 拓扑可视化失败 | 节点状态获取异常 | 检查节点监控服务，确认 Agent 运行状态 |
+| 时间线显示异常 | 执行时间缺失 | 检查执行记录，确认时间戳信息 |
+| 采样器分析不准确 | 数据聚合错误 | 检查 JTL 文件格式，验证统计逻辑 |
+| 节点监控不显示 | 节点指标获取失败 | 检查 gopsutil 依赖，确认系统监控权限 |
 
 **章节来源**
 - [ExecutionDetail.vue:2443-2454](file://web/src/views/ExecutionDetail.vue#L2443-2454)
@@ -940,22 +1163,27 @@ M --> N[优化内存使用]
 3. **服务器日志**: 检查后端服务的错误日志
 4. **性能分析**: 使用 Performance 面板分析页面性能
 5. **后端调试**: 使用 Go 调试工具检查执行结论生成过程
+6. **节点监控调试**: 检查 gopsutil 依赖和系统监控权限
 
 ## 结论
 
-执行详情视图作为 JMeter Admin 系统的核心功能模块，展现了现代 Web 应用开发的最佳实践。通过合理的架构设计、高效的性能优化和完善的错误处理机制，为用户提供了优秀的测试执行监控体验。
+执行详情视图作为 JMeter Admin 系统的核心功能模块，经过重大重构后展现了现代 Web 应用开发的最佳实践。新版本通过合理的架构设计、高效的性能优化和完善的错误处理机制，为用户提供了更加直观和高效的测试执行监控体验。
 
-本次更新显著增强了系统的智能化水平，主要体现在：
+本次重构显著增强了系统的智能化水平和用户体验，主要体现在：
 
-1. **智能执行结论**: 通过机器学习算法自动生成测试结果分析和建议
-2. **接口级统计**: 提供多维度的接口性能分析，帮助用户快速定位性能瓶颈
-3. **执行链路追踪**: 展示测试执行的完整流程，便于问题排查和流程优化
-4. **基准线对比**: 支持历史结果对比，便于性能回归测试和趋势分析
-5. **全面的监控能力**: 提供多维度的测试执行状态监控
-6. **实时性**: 通过 SSE 实现高效的数据流式传输
-7. **可视化**: 丰富的图表和仪表板设计
-8. **易用性**: 直观的用户界面和操作流程
-9. **可扩展性**: 清晰的架构设计便于功能扩展
+1. **诊断区域**: 提供执行链路的体征分析，帮助用户快速识别潜在问题
+2. **拓扑可视化**: 直观展示分布式执行的链路状态和回传情况
+3. **时间线分析**: 追踪执行的完整流程，便于问题排查和流程优化
+4. **采样器分析**: 提供多维度的接口性能分析，帮助用户快速定位性能瓶颈
+5. **节点监控**: 实时监控分布式执行节点的系统状态，及时发现资源瓶颈
+6. **智能执行结论**: 通过机器学习算法自动生成测试结果分析和建议
+7. **接口级统计**: 提供样本数、响应时间、错误率等多维度接口分析
+8. **基准线对比**: 支持历史结果对比，便于性能回归测试和趋势分析
+9. **全面的监控能力**: 提供多维度的测试执行状态监控
+10. **实时性**: 通过 SSE 实现高效的数据流式传输
+11. **可视化**: 丰富的图表和仪表板设计
+12. **易用性**: 直观的用户界面和操作流程，支持左侧目录导航
+13. **可扩展性**: 清晰的架构设计便于功能扩展
 
 未来可以考虑的改进方向：
 - 增加更多类型的图表和可视化组件
@@ -964,3 +1192,6 @@ M --> N[优化内存使用]
 - 增强与其他监控系统的集成能力
 - 添加自定义分析模板功能
 - 实现自动化性能基线设定
+- 增加更多高级分析功能，如相关性分析、异常检测等
+
+通过这次重大重构，执行详情视图不仅在功能上得到了全面增强，在用户体验和技术架构上也达到了新的高度，为 JMeter Admin 系统的整体竞争力提供了有力支撑。

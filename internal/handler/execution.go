@@ -197,7 +197,7 @@ func GetExecutionStream(c *gin.Context) {
 			errorOverview = nil
 		}
 
-		if forceNodeRefresh || lastNodeFetch.IsZero() || time.Since(lastNodeFetch) >= 9*time.Second {
+		if forceNodeRefresh || lastNodeFetch.IsZero() || time.Since(lastNodeFetch) >= 3*time.Second {
 			nodes, nodeErr := collectExecutionNodeMetricsData(execution)
 			if nodeErr == nil {
 				cachedNodes = nodes
@@ -228,7 +228,7 @@ func GetExecutionStream(c *gin.Context) {
 		return
 	}
 
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for {

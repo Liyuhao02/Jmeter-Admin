@@ -1645,8 +1645,8 @@ const reconnectAttempts = ref(0)
 const maxReconnectAttempts = 5
 const detailReconnectAttempts = ref(0)
 const maxDetailReconnectAttempts = 6
-const DETAIL_STREAM_STALE_MS = 4200
-const DETAIL_STREAM_RECONNECT_MS = 9000
+const DETAIL_STREAM_STALE_MS = 1400
+const DETAIL_STREAM_RECONNECT_MS = 4200
 const MAX_LOG_LINES = 600
 const LOG_FLUSH_INTERVAL = 300
 
@@ -1769,8 +1769,19 @@ const liveMetricsLastTimestamp = computed(() => {
   return lastPoint?.timestamp || lastPoint?.time_bucket || null
 })
 
+const shouldPollLive = computed(() => {
+  if (execution.value.status === 'running') return true
+  if (!execution.value.end_time && execution.value.status !== 'failed' && execution.value.status !== 'stopped') {
+    return true
+  }
+  if (liveMetricsLastTimestamp.value) {
+    return Date.now() - new Date(liveMetricsLastTimestamp.value).getTime() < 15000
+  }
+  return false
+})
+
 const liveMetricsFreshnessText = computed(() => {
-  if (!isExecutionRunning.value) return '结果已稳定，可查看最终统计'
+  if (!shouldPollLive.value) return '结果已稳定，可查看最终统计'
   if (!liveMetricsLastTimestamp.value) return '等待实时采样数据'
   return `最近刷新 ${formatRelativeTimeInShanghai(liveMetricsLastTimestamp.value)}`
 })
@@ -2740,7 +2751,7 @@ const getResourceColor = (percent) => {
 
 // 获取节点监控数据
 const fetchNodeMetrics = async () => {
-  if (leavingPage || !hasValidExecutionId.value || execution.value?.status !== 'running') return
+  if (leavingPage || !hasValidExecutionId.value || !shouldPollLive.value) return
   if (nodeMetricsRefreshing.value) return
   nodeMetricsRefreshing.value = true
   try {
@@ -3031,7 +3042,7 @@ const fetchLiveMetrics = async () => {
 }
 
 const refreshLiveExecutionSnapshot = async () => {
-  if (leavingPage || !hasValidExecutionId.value || execution.value?.status !== 'running') return
+  if (leavingPage || !hasValidExecutionId.value || !shouldPollLive.value) return
   await Promise.allSettled([
     fetchLiveMetrics(),
     fetchNodeMetrics()
@@ -3039,7 +3050,7 @@ const refreshLiveExecutionSnapshot = async () => {
 }
 
 const ensureDetailFreshness = async () => {
-  if (leavingPage || !pageVisible.value || !hasValidExecutionId.value || execution.value?.status !== 'running') return
+  if (leavingPage || !pageVisible.value || !hasValidExecutionId.value || !shouldPollLive.value) return
 
   if (!detailStreamConnected.value) {
     await refreshLiveExecutionSnapshot()
@@ -3435,7 +3446,7 @@ const stopDetailStream = () => {
 }
 
 const connectDetailStream = () => {
-  if (leavingPage || !hasValidExecutionId.value || execution.value?.status !== 'running') {
+  if (leavingPage || !hasValidExecutionId.value || !shouldPollLive.value) {
     stopDetailStream()
     return
   }
@@ -3484,8 +3495,8 @@ const connectDetailStream = () => {
 }
 
 const getAutoRefreshInterval = () => {
-  if (!pageVisible.value) return 6000
-  if (execution.value.status === 'running') return 2500
+  if (!pageVisible.value) return 4000
+  if (shouldPollLive.value) return 1000
   return 8000
 }
 
@@ -3494,7 +3505,7 @@ const handleVisibilityChange = () => {
   if (!leavingPage) {
     if (pageVisible.value && hasValidExecutionId.value) {
       Promise.allSettled([fetchExecutionDetail(), fetchLiveMetrics(), fetchNodeMetrics()])
-      if (execution.value.status === 'running') {
+      if (shouldPollLive.value) {
         connectDetailStream()
       }
     } else {
@@ -3588,11 +3599,13 @@ const setupAutoRefresh = () => {
   const tick = async () => {
     if (leavingPage || !hasValidExecutionId.value) return
     detailTick += 1
-    if (execution.value.status === 'running') {
+    if (shouldPollLive.value) {
       if (detailStreamConnected.value) {
         await ensureDetailFreshness()
-        if (detailTick % 2 === 0) {
+        if (detailTick % 3 === 0) {
           await Promise.allSettled([fetchExecutionDetail(), fetchNodeMetrics()])
+        } else {
+          await fetchNodeMetrics()
         }
       } else {
         await Promise.allSettled([refreshLiveExecutionSnapshot(), fetchExecutionDetail()])
@@ -3663,7 +3676,7 @@ const disposeExecutionDetail = () => {
 onMounted(() => {
   leavingPage = false
   Promise.allSettled([fetchExecutionDetail(), fetchLiveMetrics()]).then(() => {
-    if (execution.value.status !== 'running') {
+    if (!shouldPollLive.value) {
       fetchErrors()
     } else {
       fetchNodeMetrics()
@@ -3724,15 +3737,15 @@ onBeforeUnmount(() => {
 
 <style scoped lang="scss">
 .execution-detail-page {
-  --detail-sticky-offset: 102px;
+  --detail-sticky-offset: 116px;
   padding: 4px 0 18px;
 }
 
 .detail-layout {
   display: grid;
-  grid-template-columns: 192px minmax(0, 1fr);
-  gap: 16px;
-  padding-top: 4px;
+  grid-template-columns: 196px minmax(0, 1fr);
+  gap: 18px;
+  padding-top: 10px;
   align-items: start;
 }
 
@@ -3745,7 +3758,7 @@ onBeforeUnmount(() => {
 
 .detail-sidebar-card {
   padding: 14px 12px;
-  max-height: calc(100vh - var(--detail-sticky-offset) - 18px);
+  max-height: calc(100vh - var(--detail-sticky-offset) - 24px);
   overflow: auto;
   border-radius: 22px;
   border: 1px solid rgba(148, 163, 184, 0.12);
@@ -3840,7 +3853,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 18px;
 }
 
 .detail-main > .section-card {
@@ -6816,7 +6829,7 @@ onBeforeUnmount(() => {
 
 @media (max-width: 768px) {
   .execution-detail-page {
-    --detail-sticky-offset: 90px;
+    --detail-sticky-offset: 100px;
   }
 
   .detail-section-nav {

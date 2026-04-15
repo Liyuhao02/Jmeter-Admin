@@ -387,23 +387,11 @@
                       <button class="remove-node-btn" @click="toggleSlave(slave)">移除</button>
                     </div>
                   </div>
-                  <div class="node-resource-grid compact">
-                    <div class="node-metric">
-                      <span>CPU</span>
-                      <strong>{{ formatPercent(getStatsValue(slave, 'cpu')) }}</strong>
-                    </div>
-                    <div class="node-metric">
-                      <span>连接</span>
-                      <strong>{{ formatCount(getConnections(slave)) }}</strong>
-                    </div>
-                    <div class="node-metric">
-                      <span>内存</span>
-                      <strong>{{ formatPercent(getStatsValue(slave, 'memory')) }}</strong>
-                    </div>
-                    <div class="node-metric">
-                      <span>磁盘</span>
-                      <strong>{{ formatPercent(getStatsValue(slave, 'disk')) }}</strong>
-                    </div>
+                  <div class="selected-node-metrics">
+                    <span>CPU {{ formatPercent(getStatsValue(slave, 'cpu')) }}</span>
+                    <span>内存 {{ formatPercent(getStatsValue(slave, 'memory')) }}</span>
+                    <span>磁盘 {{ formatPercent(getStatsValue(slave, 'disk')) }}</span>
+                    <span>连接 {{ formatCount(getConnections(slave)) }}</span>
                   </div>
                 </article>
               </div>
@@ -1010,6 +998,16 @@ onMounted(async () => {
 .section-card {
   padding: 16px;
   border-radius: 18px;
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.08), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.036), rgba(255, 255, 255, 0.014)),
+    rgba(15, 23, 42, 0.54);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  box-shadow:
+    0 22px 48px rgba(2, 8, 23, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 .execute-hero {
@@ -1090,10 +1088,14 @@ onMounted(async () => {
 .advice-item,
 .slave-select-card {
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0)),
-    rgba(15, 23, 42, 0.4);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.06), transparent 42%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01)),
+    rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(148, 163, 184, 0.12);
   border-radius: 18px;
+  box-shadow:
+    0 14px 30px rgba(2, 8, 23, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 .hero-fact-card {
@@ -1153,6 +1155,27 @@ onMounted(async () => {
     rgba(15, 23, 42, 0.54);
 }
 
+.configuration-panel {
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.012)),
+    rgba(15, 23, 42, 0.54);
+}
+
+.distributed-panel {
+  background:
+    radial-gradient(circle at top left, rgba(34, 197, 94, 0.11), transparent 36%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.012)),
+    rgba(15, 23, 42, 0.54);
+}
+
+.advice-panel {
+  background:
+    radial-gradient(circle at top left, rgba(245, 158, 11, 0.08), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.012)),
+    rgba(15, 23, 42, 0.54);
+}
+
 .panel-heading {
   display: flex;
   align-items: flex-start;
@@ -1209,7 +1232,10 @@ onMounted(async () => {
   padding: 16px;
   border-radius: 20px;
   border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(15, 23, 42, 0.38);
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.05), transparent 44%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.01)),
+    rgba(15, 23, 42, 0.42);
   cursor: pointer;
   color: inherit;
   text-align: left;
@@ -1363,8 +1389,11 @@ onMounted(async () => {
   min-width: 0;
   padding: 12px 14px;
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.012)),
+    rgba(15, 23, 42, 0.44);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
 
   span {
     display: block;
@@ -1407,6 +1436,7 @@ onMounted(async () => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(208px, 1fr));
   gap: 12px;
+  margin-top: 16px;
 }
 
 .slave-select-card {
@@ -1420,12 +1450,19 @@ onMounted(async () => {
   &:hover:not(.offline) {
     border-color: rgba(0, 170, 255, 0.2);
     transform: translateY(-1px);
+    box-shadow:
+      0 18px 32px rgba(2, 8, 23, 0.12),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
   }
 
   &.active {
     border-color: rgba(0, 170, 255, 0.45);
-    background: linear-gradient(135deg, rgba(0, 102, 255, 0.12), rgba(0, 170, 255, 0.06));
-    box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.1);
+    background:
+      radial-gradient(circle at top left, rgba(56, 189, 248, 0.14), transparent 44%),
+      linear-gradient(135deg, rgba(0, 102, 255, 0.12), rgba(0, 170, 255, 0.06));
+    box-shadow:
+      0 0 0 1px rgba(56, 189, 248, 0.1),
+      0 18px 36px rgba(2, 8, 23, 0.14);
   }
 
   &.offline {
@@ -1807,23 +1844,24 @@ onMounted(async () => {
     rgba(10, 17, 31, 0.58);
 }
 
-.selected-node-card .node-resource-grid.compact {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+.selected-node-metrics {
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-}
+  margin-top: 10px;
 
-.selected-node-card .node-metric {
-  min-height: 76px;
-  padding: 10px 12px;
-  border-radius: 12px;
-}
-
-.selected-node-card .node-metric span {
-  font-size: 10px;
-}
-
-.selected-node-card .node-metric strong {
-  font-size: 14px;
+  span {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 30px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-secondary);
+    font-size: 11px;
+    white-space: nowrap;
+  }
 }
 
 .selected-node-actions {
@@ -1873,6 +1911,13 @@ onMounted(async () => {
   bottom: 16px;
   z-index: 5;
   backdrop-filter: blur(16px);
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background:
+    linear-gradient(180deg, rgba(10, 18, 30, 0.86), rgba(8, 14, 26, 0.9));
+  box-shadow: 0 16px 36px rgba(2, 8, 23, 0.24);
 }
 
 .execute-footer-left {

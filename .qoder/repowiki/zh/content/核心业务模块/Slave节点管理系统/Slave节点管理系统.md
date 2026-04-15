@@ -16,16 +16,19 @@
 - [slave.js](file://web/src/api/slave.js)
 - [execution.go](file://internal/service/execution.go)
 - [execution.go](file://internal/model/execution.go)
+- [execution_diagnostics.go](file://internal/service/execution_diagnostics.go)
+- [execution_environment.go](file://internal/service/execution_environment.go)
+- [ExecutionDetail.vue](file://web/src/views/ExecutionDetail.vue)
 </cite>
 
 ## 更新摘要
 **所做更改**
-- 新增Agent状态监控功能章节，详细介绍实时资源监控机制
-- 更新心跳检测机制章节，增加双通道检测（JMeter RMI + Agent HTTP）
-- 新增Agent系统统计信息收集章节，说明系统资源监控实现
-- 更新数据库模式章节，添加Agent相关字段
+- 新增预检检查功能章节，详细介绍执行前体检机制
+- 更新实时资源监控功能，增强Agent系统统计信息收集
+- 新增节点拓扑可视化功能，提供分布式执行链路展示
+- 更新心跳检测机制，增加双通道检测（JMeter RMI + Agent HTTP）
 - 新增Agent健康检查API和前端展示功能
-- 更新故障排除指南，增加Agent相关诊断内容
+- 更新故障排除指南，增加预检检查和拓扑诊断内容
 
 ## 目录
 1. [简介](#简介)
@@ -42,7 +45,7 @@
 
 Slave节点管理系统是JMeter Admin项目的核心组成部分，负责分布式测试环境中Slave节点的全生命周期管理。该系统提供了节点注册、发现、状态管理、删除以及心跳检测等完整功能，确保分布式测试的稳定性和可靠性。
 
-**重要更新**：系统现已增强实时资源监控功能，Slave节点支持Agent状态监控、系统统计信息收集和诊断功能。通过双通道检测机制（JMeter RMI + Agent HTTP），系统能够全面监控节点的运行状态和资源使用情况。
+**重要更新**：系统现已增强预检检查、实时资源监控和节点拓扑可视化功能，显著提升了分布式执行能力。新增的预检检查功能允许在执行前对节点进行全面体检，节点拓扑可视化功能提供了分布式执行链路的直观展示，实时资源监控功能通过Agent服务实现对节点的全面监控。
 
 系统采用前后端分离架构，后端基于Go语言和Gin框架构建RESTful API，前端使用Vue.js开发响应式管理界面。通过SQLite数据库存储节点配置和状态信息，实现了轻量级、易部署的分布式测试节点管理解决方案。
 
@@ -56,42 +59,48 @@ subgraph "前端层 (Web)"
 A[Vue.js 应用]
 B[Element Plus UI组件]
 C[API客户端]
+D[预检检查组件]
+E[拓扑可视化组件]
 end
 subgraph "后端层 (Server)"
-D[Gin Web框架]
-E[路由层]
-F[处理器层]
-G[服务层]
-H[模型层]
+F[Gin Web框架]
+G[路由层]
+H[处理器层]
+I[服务层]
+J[模型层]
 end
 subgraph "数据层 (Database)"
-I[SQLite 数据库]
-J[表结构定义]
-K[索引优化]
+K[SQLite 数据库]
+L[表结构定义]
+M[索引优化]
 end
 subgraph "配置层 (Config)"
-L[配置文件]
-M[全局配置]
-N[运行时配置]
+N[配置文件]
+O[全局配置]
+P[运行时配置]
 end
 subgraph "Agent层"
-O[jmeter-agent 服务]
-P[系统统计收集]
-Q[健康检查接口]
+Q[jmeter-agent 服务]
+R[系统统计收集]
+S[健康检查接口]
+T[回调检测]
 end
-A --> D
-B --> D
-C --> D
-D --> E
+A --> F
+B --> F
+C --> F
+D --> F
 E --> F
 F --> G
 G --> H
-G --> I
 H --> I
-L --> M
-M --> N
-O --> Q
-P --> Q
+I --> J
+I --> K
+J --> K
+N --> O
+O --> P
+Q --> R
+R --> S
+S --> T
 ```
 
 **图表来源**
@@ -107,7 +116,7 @@ P --> Q
 
 ### 数据模型层
 
-系统的核心数据模型围绕Slave节点展开，定义了完整的节点信息结构。**新增Agent相关字段**：
+系统的核心数据模型围绕Slave节点展开，定义了完整的节点信息结构。**新增Agent相关字段和预检检查模型**：
 
 ```mermaid
 classDiagram
@@ -126,27 +135,59 @@ class Slave {
 +int64 AgentUptime
 +string CreatedAt
 }
-class Execution {
+class SlavePreflightNode {
 +int64 ID
-+int64 ScriptID
-+string ScriptName
-+string SlaveIDs
-+string Status
-+string StartTime
-+string EndTime
-+int64 Duration
-+string Remarks
-+string ResultPath
-+string ReportPath
-+string SummaryData
-+string LogPath
-+string CreatedAt
++string Name
++string Host
++int Port
++int AgentPort
++bool JMeterOnline
++bool AgentOnline
++bool CallbackReachable
++int64 CallbackLatencyMS
++int CallbackStatusCode
++string CallbackError
++string Suggestion
++AgentSystemStats SystemStats
+}
+class SlavePreflightReport {
++string MasterHost
++string MasterCallbackURL
++int SelectedCount
++int ReadyCount
++string[] Warnings
++SlavePreflightNode[] Nodes
 }
 class AgentSystemStats {
 +CPU CPUStats
 +Memory MemoryStats
 +Disk DiskStats
 +Network NetworkStats
+}
+class ExecutionDiagnostics {
++string Mode
++bool IncludeMaster
++int SlaveCount
++string[] SlaveHosts
++string MasterCallbackBaseURL
++string MasterDetailUploadURL
++ExecutionFileStatus[] ResultFiles
++ExecutionFileStatus[] RuntimeScripts
++bool ResultMergeReady
++bool SaveHTTPDetails
++string DetailState
++bool SplitCSV
++ExecutionFileStatus DetailLocalFile
++ExecutionFileStatus[] DetailRemoteFiles
++string[] ExpectedDetailSources
++string[] ReceivedDetailSources
++string[] MissingDetailSources
++string[] CSVDependencies
++string[] FileDependencies
++string[] PluginDependencies
++string[] MissingDependencies
++string[] Warnings
++ScriptPreflightReport Preflight
 }
 class CreateSlaveRequest {
 +string Name
@@ -162,7 +203,9 @@ class UpdateSlaveRequest {
 +int AgentPort
 +string AgentToken
 }
-Slave <|-- Execution : "协作"
+Slave <|-- ExecutionDiagnostics : "协作"
+SlavePreflightNode --> Slave : "节点信息"
+SlavePreflightReport --> SlavePreflightNode : "包含"
 CreateSlaveRequest --> Slave : "创建"
 UpdateSlaveRequest --> Slave : "更新"
 ```
@@ -174,7 +217,7 @@ UpdateSlaveRequest --> Slave : "更新"
 
 ### 配置管理
 
-系统采用YAML格式的配置文件，支持运行时热更新和持久化存储。**新增Agent配置项**：
+系统采用YAML格式的配置文件，支持运行时热更新和持久化存储。**新增Agent配置项和预检检查配置**：
 
 | 配置项 | 类型 | 默认值 | 描述 |
 |--------|------|--------|------|
@@ -186,26 +229,32 @@ UpdateSlaveRequest --> Slave : "更新"
 | dirs.data | string | "./data" | SQLite数据库目录 |
 | dirs.uploads | string | "./uploads" | 脚本上传目录 |
 | dirs.results | string | "./results" | 测试结果目录 |
+| preflight.enabled | bool | true | 预检检查开关 |
+| topology.visualization | bool | true | 拓扑可视化开关 |
 
 **章节来源**
 - [config.go:10-39](file://config/config.go#L10-L39)
-- [config.yaml:1-26](file://config.yaml#L1-L26)
+- [config.yaml:1-26](file://config.yaml#L1-26)
 
 ## 架构概览
 
-系统采用微服务化的分层架构，各层职责明确，耦合度低。**新增Agent监控架构**：
+系统采用微服务化的分层架构，各层职责明确，耦合度低。**新增预检检查和拓扑可视化架构**：
 
 ```mermaid
 graph TB
 subgraph "表现层"
 UI[Web界面]
 API[RESTful API]
+Preflight[预检检查组件]
+Topology[拓扑可视化组件]
 end
 subgraph "业务逻辑层"
 Handler[HTTP处理器]
 Service[业务服务]
 Model[数据模型]
 Diagnostic[诊断服务]
+PreflightService[预检检查服务]
+TopologyService[拓扑可视化服务]
 end
 subgraph "数据访问层"
 DB[SQLite数据库]
@@ -218,6 +267,7 @@ Logger[日志系统]
 Timer[定时任务]
 Agent[jmeter-agent服务]
 StatsCollector[系统统计收集]
+CallbackChecker[回调检测]
 end
 UI --> API
 API --> Handler
@@ -226,11 +276,16 @@ Service --> Model
 Service --> DB
 Service --> Agent
 Agent --> StatsCollector
+StatsCollector --> CallbackChecker
 DB --> Migration
 DB --> Index
 Config --> Service
 Timer --> Service
 Timer --> Agent
+Preflight --> PreflightService
+Topology --> TopologyService
+PreflightService --> Diagnostic
+TopologyService --> Diagnostic
 ```
 
 **图表来源**
@@ -242,7 +297,7 @@ Timer --> Agent
 
 ### Slave节点管理API
 
-系统提供了完整的Slave节点管理API，支持CRUD操作和状态检测。**新增Agent健康检查功能**：
+系统提供了完整的Slave节点管理API，支持CRUD操作和状态检测。**新增预检检查和拓扑可视化功能**：
 
 #### 注册功能
 
@@ -286,6 +341,31 @@ ReturnResult --> End([完成])
 
 **图表来源**
 - [slave.go:16-41](file://internal/service/slave.go#L16-L41)
+
+#### 预检检查功能
+
+**新增功能**：系统现在支持执行前预检检查，提供全面的节点体检报告：
+
+```mermaid
+sequenceDiagram
+participant Client as 客户端
+participant API as 预检API
+participant Service as 预检服务
+participant SlaveService as 节点服务
+participant Agent as Agent服务
+Client->>API : GET /api/slaves/preflight?ids=1,2&master_host=192.168.1.100
+API->>Service : GetSlavePreflightReport(ids, master_host)
+Service->>SlaveService : ListSlaves()
+SlaveService->>Agent : 检测Agent健康状态
+Agent-->>SlaveService : 返回系统统计
+Service->>Service : 检测回调可达性
+Service-->>API : 返回预检报告
+API-->>Client : 返回体检结果
+```
+
+**图表来源**
+- [slave.go:294-387](file://internal/service/slave.go#L294-L387)
+- [slave.go:147-173](file://internal/handler/slave.go#L147-L173)
 
 #### 状态管理
 
@@ -420,9 +500,68 @@ Agent服务支持配置管理，包括端口、数据目录和认证令牌：
 - [server.go:14-19](file://internal/agent/server.go#L14-L19)
 - [main.go:14-50](file://cmd/agent/main.go#L14-L50)
 
+### 节点拓扑可视化
+
+**新增功能**：系统现在支持节点拓扑可视化，提供分布式执行链路的直观展示。
+
+#### 拓扑数据构建
+
+系统根据执行诊断信息构建节点拓扑图：
+
+```mermaid
+flowchart TD
+Start([开始构建拓扑]) --> CollectDiagnostics[收集执行诊断]
+CollectDiagnostics --> ExtractNodes[提取节点信息]
+ExtractNodes --> BuildTopology[构建拓扑结构]
+BuildTopology --> GenerateCards[生成拓扑卡片]
+GenerateCards --> RenderUI[渲染UI界面]
+RenderUI --> End([完成])
+```
+
+**图表来源**
+- [execution_diagnostics.go:685-877](file://internal/service/execution_diagnostics.go#L685-L877)
+
+#### 拓扑卡片展示
+
+前端组件展示分布式执行的关键节点和连接关系：
+
+```mermaid
+graph LR
+subgraph "分布式拓扑"
+A[Master节点] --> B[Slave节点1]
+A --> C[Slave节点2]
+A --> D[Slave节点N]
+B --> E[回调链路]
+C --> F[回调链路]
+D --> G[回调链路]
+end
+subgraph "状态指示"
+H[在线状态] --> I[绿色]
+J[离线状态] --> K[红色]
+L[部分在线] --> M[橙色]
+end
+```
+
+**图表来源**
+- [ExecutionDetail.vue:268-314](file://web/src/views/ExecutionDetail.vue#L268-L314)
+
+#### 拓扑元数据展示
+
+系统提供拓扑相关的元数据信息：
+
+| 元数据项 | 描述 | 示例值 |
+|----------|------|--------|
+| Master回调基地址 | Master节点回调地址 | http://192.168.1.100:8080 |
+| HTTP明细回传 | 是否开启明细回传 | 已开启/未开启 |
+| 明细上传端点 | 错误明细上传地址 | /api/executions/123/error-details/upload |
+| 节点数量 | 分布式节点总数 | 3个节点 |
+
+**章节来源**
+- [ExecutionDetail.vue:287-300](file://web/src/views/ExecutionDetail.vue#L287-L300)
+
 ### 网络连通性验证
 
-系统提供了多层次的网络连通性验证机制。**新增Agent连接验证**：
+系统提供了多层次的网络连通性验证机制。**新增Agent连接验证和回调可达性检测**：
 
 #### IP地址验证
 
@@ -443,7 +582,7 @@ CheckNetwork --> ReturnSuccess[返回成功]
 
 #### 端口检查
 
-系统支持TCP端口连通性检测，使用3秒超时机制。**新增Agent端口检测**：
+系统支持TCP端口连通性检测，使用3秒超时机制。**新增Agent端口检测和回调端口检测**：
 
 **章节来源**
 - [slave.go:124-167](file://internal/handler/slave.go#L124-L167)
@@ -497,11 +636,13 @@ M[检测按钮] --> N[CircleCheck图标]
 O[编辑按钮] --> P[Edit图标]
 Q[删除按钮] --> R[Delete图标]
 S[资源详情] --> T[InfoFilled图标]
+U[预检检查] --> V[ShieldCheck图标]
 end
 subgraph "资源监控"
-U[CPU使用率] --> V[进度条]
-W[内存使用率] --> X[进度条]
-Y[磁盘使用率] --> Z[进度条]
+W[CPU使用率] --> X[进度条]
+Y[内存使用率] --> Z[进度条]
+AA[磁盘使用率] --> AB[进度条]
+AC[高负载节点] --> AD[警告标识]
 end
 ```
 
@@ -511,14 +652,14 @@ end
 
 #### 实时状态更新
 
-前端通过定时器每10秒自动刷新心跳状态，确保UI与实际状态一致。**新增Agent状态刷新**：
+前端通过定时器每10秒自动刷新心跳状态，确保UI与实际状态一致。**新增Agent状态刷新和预检检查功能**：
 
 **章节来源**
 - [SlaveManage.vue:517-549](file://web/src/views/SlaveManage.vue#L517-L549)
 
 ## 依赖关系分析
 
-系统采用模块化的依赖设计，各模块之间通过清晰的接口进行交互。**新增Agent服务依赖**：
+系统采用模块化的依赖设计，各模块之间通过清晰的接口进行交互。**新增Agent服务依赖和预检检查依赖**：
 
 ```mermaid
 graph TB
@@ -528,28 +669,39 @@ B[SQLite驱动]
 C[Element Plus UI]
 D[Vue.js框架]
 E[gopsutil系统监控]
+F[Socket.io实时通信]
 end
 subgraph "内部模块"
-F[配置模块]
-G[数据库模块]
-H[路由模块]
-I[处理器模块]
-J[服务模块]
-K[模型模块]
-L[Agent服务模块]
+G[配置模块]
+H[数据库模块]
+I[路由模块]
+J[处理器模块]
+K[服务模块]
+L[模型模块]
+M[Agent服务模块]
+N[预检检查模块]
+O[拓扑可视化模块]
+P[诊断服务模块]
 end
-A --> H
-B --> G
+A --> I
+B --> H
 C --> D
-D --> I
-H --> I
+D --> J
+F --> P
+H --> G
 I --> J
 J --> K
-J --> G
-J --> L
-F --> J
-F --> H
-L --> E
+K --> L
+K --> H
+K --> M
+K --> N
+K --> O
+K --> P
+M --> E
+N --> P
+O --> P
+G --> K
+G --> I
 ```
 
 **图表来源**
@@ -559,7 +711,7 @@ L --> E
 
 ### 数据库设计
 
-系统使用SQLite作为数据存储，支持自动迁移和索引优化。**新增Agent相关字段**：
+系统使用SQLite作为数据存储，支持自动迁移和索引优化。**新增Agent相关字段和预检检查数据**：
 
 ```mermaid
 erDiagram
@@ -613,6 +765,7 @@ datetime updated_at
 }
 SLAVES ||--o{ EXECUTIONS : "关联"
 SCRIPTS ||--o{ SCRIPT_FILES : "包含"
+}
 ```
 
 **图表来源**
@@ -623,7 +776,7 @@ SCRIPTS ||--o{ SCRIPT_FILES : "包含"
 
 ## 性能考虑
 
-系统在设计时充分考虑了性能优化，采用了多种策略提升响应速度和资源利用率。**新增Agent监控性能优化**：
+系统在设计时充分考虑了性能优化，采用了多种策略提升响应速度和资源利用率。**新增Agent监控性能优化和预检检查性能优化**：
 
 ### 并发优化
 
@@ -631,6 +784,7 @@ SCRIPTS ||--o{ SCRIPT_FILES : "包含"
 - **异步处理**：心跳检测采用goroutine异步执行
 - **连接复用**：TCP连接检测后及时关闭，避免连接泄漏
 - **Agent并发**：Agent健康检查支持并行执行，提升检测效率
+- **预检检查缓存**：预检报告结果缓存，减少重复计算
 
 ### 数据库优化
 
@@ -638,18 +792,28 @@ SCRIPTS ||--o{ SCRIPT_FILES : "包含"
 - **批量操作**：支持批量检测和状态更新
 - **连接池**：SQLite连接自动管理
 - **字段优化**：新增Agent相关字段支持高效查询
+- **预检检查数据压缩**：减少存储空间占用
 
 ### 缓存策略
 
 - **内存缓存**：配置信息存储在内存中，减少磁盘I/O
 - **前端缓存**：节点状态在前端本地缓存，减少重复请求
 - **系统统计缓存**：Agent系统统计信息定期更新，避免频繁收集
+- **拓扑数据缓存**：拓扑可视化数据缓存，提升渲染性能
 
 ### Agent性能优化
 
 - **快速采样**：CPU采样使用500ms超时，平衡准确性和性能
 - **增量更新**：仅在状态变化时更新数据库
 - **资源限制**：Agent服务占用最小系统资源
+- **回调检测优化**：回调可达性检测使用连接复用
+
+### 预检检查性能优化
+
+- **并行检测**：多个节点预检检查并行执行
+- **智能缓存**：相同配置的节点共享检测结果
+- **增量更新**：仅更新发生变化的节点状态
+- **超时控制**：预检检查设置合理超时时间
 
 ## 故障排除指南
 
@@ -663,6 +827,7 @@ SCRIPTS ||--o{ SCRIPT_FILES : "包含"
 2. 端口被防火墙阻止
 3. Slave服务未启动
 4. **Agent服务未启动或配置错误**
+5. **预检检查失败**
 
 **解决步骤**：
 1. 检查网络连通性：`ping <slave-host>`
@@ -670,6 +835,7 @@ SCRIPTS ||--o{ SCRIPT_FILES : "包含"
 3. 确认Slave服务状态：`ps aux | grep jmeter-server`
 4. **启动Agent服务：`./jmeter-agent -port 8089 -data-dir ./csv-data`**
 5. **验证Agent健康检查：`curl http://<slave-host>:8089/health`**
+6. **检查预检检查结果：`curl http://localhost:8080/api/slaves/preflight?ids=1`**
 
 #### Agent相关问题
 
@@ -679,6 +845,7 @@ SCRIPTS ||--o{ SCRIPT_FILES : "包含"
 2. 端口被防火墙阻止
 3. 认证令牌配置错误
 4. 系统资源监控权限不足
+5. **Agent系统统计收集失败**
 
 **解决方法**：
 1. **检查Agent进程状态**：`ps aux | grep jmeter-agent`
@@ -686,6 +853,40 @@ SCRIPTS ||--o{ SCRIPT_FILES : "包含"
 3. **检查认证配置**：确认AgentToken配置正确
 4. **验证系统权限**：确保Agent有访问系统资源的权限
 5. **查看Agent日志**：检查`/var/log/jmeter-agent.log`
+6. **检查系统统计权限**：确认Agent有读取系统信息的权限
+
+#### 预检检查异常
+
+**症状**：预检检查报告不准确或超时
+**可能原因**：
+1. 预检检查服务未启动
+2. 节点数量过多导致超时
+3. 数据库连接问题
+4. **Agent服务响应慢**
+5. **回调检测失败**
+
+**解决方法**：
+1. **检查预检检查服务状态**：`curl http://localhost:8080/api/slaves/preflight`
+2. **减少同时预检的节点数量**：分批执行预检检查
+3. **检查数据库连接**：确认数据库服务正常
+4. **优化Agent性能**：检查Agent服务响应时间
+5. **验证回调地址配置**：确认Master回调地址正确
+
+#### 拓扑可视化问题
+
+**症状**：分布式拓扑图显示异常或数据不完整
+**可能原因**：
+1. 执行诊断数据缺失
+2. 拓扑服务未启动
+3. Socket.io连接问题
+4. **节点状态数据不一致**
+
+**解决方法**：
+1. **检查执行诊断数据**：`curl http://localhost:8080/api/executions/123/diagnostics`
+2. **验证拓扑服务状态**：确认拓扑可视化服务正常运行
+3. **检查实时通信**：验证Socket.io连接状态
+4. **同步节点状态**：重新获取最新的节点状态数据
+5. **清理浏览器缓存**：清除浏览器缓存重新加载页面
 
 #### 心跳检测异常
 
@@ -695,12 +896,14 @@ SCRIPTS ||--o{ SCRIPT_FILES : "包含"
 2. 网络延迟过高
 3. 并发检测过多
 4. **Agent响应超时**
+5. **预检检查干扰**
 
 **解决方法**：
 1. 调整心跳间隔配置
 2. 检查网络延迟
 3. 减少并发检测数量
 4. **增加Agent超时时间或优化Agent性能**
+5. **暂停预检检查避免干扰**
 
 #### 配置更新失败
 
@@ -712,7 +915,7 @@ SCRIPTS ||--o{ SCRIPT_FILES : "包含"
 
 ### 调试工具
 
-系统提供了完善的调试和监控功能。**新增Agent调试工具**：
+系统提供了完善的调试和监控功能。**新增Agent调试工具和预检检查调试工具**：
 
 ```mermaid
 flowchart TD
@@ -720,7 +923,9 @@ DebugStart[开始调试] --> CheckLogs[查看服务日志]
 CheckLogs --> VerifyConfig[验证配置文件]
 VerifyConfig --> TestAPI[测试API接口]
 TestAPI --> CheckAgent[检查Agent服务]
-CheckAgent --> MonitorDB[监控数据库状态]
+CheckAgent --> CheckPreflight[检查预检检查]
+CheckPreflight --> CheckTopology[检查拓扑可视化]
+CheckTopology --> MonitorDB[监控数据库状态]
 MonitorDB --> AnalyzeMetrics[分析性能指标]
 AnalyzeMetrics --> FixIssues[修复问题]
 FixIssues --> EndDebug[结束调试]
@@ -733,17 +938,19 @@ FixIssues --> EndDebug[结束调试]
 
 Slave节点管理系统是一个功能完整、架构清晰的分布式测试节点管理解决方案。系统通过模块化设计实现了高内聚、低耦合的代码结构，提供了丰富的API接口和友好的用户界面。
 
-**重要更新**：系统现已增强实时资源监控功能，通过Agent服务实现对Slave节点的全面监控。新增的双通道检测机制（JMeter RMI + Agent HTTP）确保了节点状态的准确性和完整性。
+**重要更新**：系统现已增强预检检查、实时资源监控和节点拓扑可视化功能，显著提升了分布式执行能力。新增的预检检查功能允许在执行前对节点进行全面体检，节点拓扑可视化功能提供了分布式执行链路的直观展示，实时资源监控功能通过Agent服务实现对节点的全面监控。
 
 ### 主要优势
 
 1. **完整的生命周期管理**：从节点注册到状态监控的全流程覆盖
 2. **智能心跳检测**：自动化的节点状态维护机制，支持双通道检测
 3. **实时资源监控**：Agent服务提供CPU、内存、磁盘、网络等系统资源监控
-4. **灵活的配置管理**：支持运行时配置更新和持久化存储
-5. **高性能设计**：并发控制和资源优化确保系统稳定性
-6. **全面的诊断功能**：提供详细的连接诊断和故障排除建议
-7. **易于部署**：单文件部署，零依赖要求
+4. **全面的预检检查**：执行前节点体检，确保分布式执行的稳定性
+5. **直观的拓扑可视化**：分布式执行链路的可视化展示
+6. **灵活的配置管理**：支持运行时配置更新和持久化存储
+7. **高性能设计**：并发控制和资源优化确保系统稳定性
+8. **全面的诊断功能**：提供详细的连接诊断和故障排除建议
+9. **易于部署**：单文件部署，零依赖要求
 
 ### 应用场景
 
@@ -753,6 +960,8 @@ Slave节点管理系统是一个功能完整、架构清晰的分布式测试节
 - CI/CD集成测试
 - 负载压力测试
 - **实时资源监控和性能分析**
+- **分布式执行前的全面体检**
+- **复杂分布式系统的可视化监控**
 
 ### 未来发展方向
 
@@ -761,5 +970,8 @@ Slave节点管理系统是一个功能完整、架构清晰的分布式测试节
 3. **安全加固**：添加认证授权和数据加密
 4. **自动化运维**：支持Kubernetes容器化部署
 5. **AI诊断**：基于机器学习的故障预测和自动修复
+6. **智能预检**：基于历史数据的智能预检建议
+7. **实时拓扑**：动态更新的实时拓扑可视化
+8. **预测性维护**：基于资源使用趋势的预测性维护
 
-通过持续的功能完善和技术演进，Slave节点管理系统将继续为分布式测试提供可靠的技术支撑，特别是在实时资源监控和智能诊断方面将发挥重要作用。
+通过持续的功能完善和技术演进，Slave节点管理系统将继续为分布式测试提供可靠的技术支撑，特别是在预检检查、实时资源监控和智能拓扑可视化方面将发挥重要作用。

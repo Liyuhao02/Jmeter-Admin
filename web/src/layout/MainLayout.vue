@@ -261,17 +261,17 @@ const isScriptExecutePage = computed(() => {
   max-width: 1720px;
   width: 100%;
   margin: 0 auto;
-  padding: 28px clamp(24px, 2.5vw, 40px) 36px;
+  padding: 28px clamp(28px, 3vw, 52px) 36px;
 }
 
 .content-wrapper--wide {
   max-width: 1780px;
-  padding: 22px clamp(20px, 2.2vw, 34px) 28px;
+  padding: 22px clamp(24px, 2.6vw, 44px) 28px;
 }
 
 .content-wrapper--execution {
   max-width: 1800px;
-  padding: 24px clamp(24px, 2.7vw, 42px) 34px;
+  padding: 26px clamp(30px, 3.1vw, 56px) 36px;
 }
 
 .route-loading-shell {

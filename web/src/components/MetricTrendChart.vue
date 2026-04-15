@@ -226,6 +226,32 @@ const chartData = computed(() => {
   }))
 })
 
+const timeDomain = computed(() => {
+  const epochs = chartData.value
+    .map(item => Number(item.epochSecond || 0))
+    .filter(value => Number.isFinite(value) && value > 0)
+
+  if (epochs.length >= 2) {
+    const start = Math.min(...epochs)
+    const end = Math.max(...epochs)
+    if (end > start) {
+      return {
+        start,
+        end,
+        span: end - start,
+        useEpoch: true
+      }
+    }
+  }
+
+  return {
+    start: 0,
+    end: Math.max(chartData.value.length - 1, 1),
+    span: Math.max(chartData.value.length - 1, 1),
+    useEpoch: false
+  }
+})
+
 const chartValues = computed(() => chartData.value.map(item => item.rawValue))
 const secondChartValues = computed(() => props.secondField ? chartData.value.map(item => item.secondRawValue) : [])
 
@@ -254,11 +280,13 @@ const yTicks = computed(() => {
 const chartPoints = computed(() => {
   const values = chartValues.value
   if (!values.length) return []
-  const stepX = values.length > 1 ? chartWidth.value / (values.length - 1) : 0
 
   return chartData.value.map((item, index) => {
     const ratio = valueMax.value > 0 ? item.rawValue / valueMax.value : 0
-    const x = chartLeft.value + index * stepX
+    const xRatio = timeDomain.value.useEpoch
+      ? (Number(item.epochSecond || timeDomain.value.start) - timeDomain.value.start) / Math.max(timeDomain.value.span, 1)
+      : index / Math.max(values.length - 1, 1)
+    const x = chartLeft.value + chartWidth.value * xRatio
     const y = chartBottom.value - ratio * chartHeight.value
     return {
       ...item,
@@ -272,11 +300,13 @@ const secondChartPoints = computed(() => {
   if (!props.secondField) return []
   const values = secondChartValues.value
   if (!values.length) return []
-  const stepX = values.length > 1 ? chartWidth.value / (values.length - 1) : 0
 
   return chartData.value.map((item, index) => {
     const ratio = valueMax.value > 0 ? item.secondRawValue / valueMax.value : 0
-    const x = chartLeft.value + index * stepX
+    const xRatio = timeDomain.value.useEpoch
+      ? (Number(item.epochSecond || timeDomain.value.start) - timeDomain.value.start) / Math.max(timeDomain.value.span, 1)
+      : index / Math.max(values.length - 1, 1)
+    const x = chartLeft.value + chartWidth.value * xRatio
     const y = chartBottom.value - ratio * chartHeight.value
     return {
       ...item,
@@ -302,7 +332,27 @@ const xTicks = computed(() => {
   if (!points.length) return []
 
   const tickCapacity = Math.max(2, Math.floor(chartWidth.value / 126))
-  const desired = Math.min(props.maxXTicks, tickCapacity, points.length - 1)
+  const desired = Math.max(1, Math.min(props.maxXTicks, tickCapacity))
+
+  if (timeDomain.value.useEpoch) {
+    const indices = Array.from({ length: desired + 1 }, (_, idx) => idx)
+    return indices.map((tickIndex) => {
+      const ratio = desired === 0 ? 0 : tickIndex / desired
+      const epoch = Math.round(timeDomain.value.start + timeDomain.value.span * ratio)
+      return {
+        index: tickIndex,
+        x: chartLeft.value + chartWidth.value * ratio,
+        label: formatEpochXAxisLabel(epoch, timeDomain.value.span),
+        anchor:
+          tickIndex === 0
+            ? 'start'
+            : tickIndex === indices.length - 1
+              ? 'end'
+              : 'middle'
+      }
+    })
+  }
+
   if (desired <= 0) {
     return [{
       index: 0,
@@ -312,9 +362,8 @@ const xTicks = computed(() => {
     }]
   }
 
-  const indices = Array.from({ length: desired + 1 }, (_, idx) => {
-    return Math.round((idx / desired) * (points.length - 1))
-  }).filter((value, idx, arr) => arr.indexOf(value) === idx)
+  const indices = Array.from({ length: desired + 1 }, (_, idx) => Math.round((idx / desired) * (points.length - 1)))
+    .filter((value, idx, arr) => arr.indexOf(value) === idx)
 
   return indices.map((index, tickIndex) => ({
     index,
@@ -376,6 +425,20 @@ const formatXAxisLabel = (timestamp) => {
   }
 
   return text.length > 8 ? text.slice(0, 8) : text
+}
+
+const formatEpochXAxisLabel = (epochSecond, span) => {
+  if (!epochSecond) return '--'
+  const date = new Date(epochSecond * 1000)
+  const hh = String(date.getHours()).padStart(2, '0')
+  const mm = String(date.getMinutes()).padStart(2, '0')
+  const ss = String(date.getSeconds()).padStart(2, '0')
+
+  if (span >= 3600) {
+    return `${hh}:${mm}`
+  }
+
+  return `${hh}:${mm}:${ss}`
 }
 
 const clearHover = () => {

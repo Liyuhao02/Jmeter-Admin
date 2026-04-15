@@ -106,6 +106,53 @@ make build-linux
 ./jmeter-admin
 ```
 
+## 打包分享前清理
+
+如果你准备把项目源码打包发给别人，建议先清掉本地构建产物、运行结果、数据库和上传文件，避免把无关的大文件、日志或本地环境信息一起带出去。
+
+### 推荐命令
+
+```bash
+# 一键清理构建产物、本地数据库、上传文件、执行结果和前端依赖
+make clean-share
+```
+
+### `make clean-share` 会清理什么
+
+- 后端二进制：`jmeter-admin`、`jmeter-agent`
+- 前端构建产物：`web/dist`、`web/.vite`
+- 前端依赖：`web/node_modules`
+- Go 本地缓存：`.gocache`
+- 本地运行数据：`data`、`uploads`、`results`、`temp`
+- 本地日志和输出：`jmeter.log`、`*.out`
+- 本地生成配置：`config.yaml`
+- macOS 元数据：`.DS_Store`
+
+### 等价命令
+
+如果不想走 `make`，也可以直接执行下面这组命令：
+
+```bash
+rm -f jmeter-admin jmeter-agent jmeter.log *.out config.yaml
+rm -rf .gocache temp data uploads results web/dist web/node_modules web/.vite
+find . -name '.DS_Store' -delete
+```
+
+### 注意事项
+
+- 以上命令会删除本地数据库、上传脚本、执行结果和日志，执行前请确认这些内容已经备份。
+- 清理后如果你还要本地开发，前端依赖需要重新安装：
+
+```bash
+cd web && npm install
+```
+
+- 如果你只是想清理编译产物，不想删除本地数据，可以使用：
+
+```bash
+make clean
+```
+
 ## 配置说明
 
 `config.yaml` 文件首次启动时自动生成：
