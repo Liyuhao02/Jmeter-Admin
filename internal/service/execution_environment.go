@@ -50,6 +50,8 @@ type executionEnvironmentSnapshot struct {
 	Differences []executionEnvironmentDifference `json:"differences,omitempty"`
 }
 
+type EnvironmentReport = executionEnvironmentReport
+
 func hashStrings(values []string) string {
 	sum := sha256.Sum256([]byte(strings.Join(values, "\n")))
 	return hex.EncodeToString(sum[:])
@@ -215,6 +217,10 @@ func collectLocalExecutionEnvironment() executionEnvironmentReport {
 	return report
 }
 
+func GetLocalEnvironmentReport() EnvironmentReport {
+	return collectLocalExecutionEnvironment()
+}
+
 func collectSlaveExecutionEnvironment(slave model.Slave) (executionEnvironmentReport, error) {
 	client := NewAgentClient(slave.Host, slave.AgentPort, slave.AgentToken)
 	report, err := client.GetEnvironmentReport()
@@ -240,6 +246,10 @@ func collectSlaveExecutionEnvironment(slave model.Slave) (executionEnvironmentRe
 		PropertiesFingerprint: report.PropertiesFingerprint,
 		Warnings:              report.Warnings,
 	}, nil
+}
+
+func GetSlaveEnvironmentReport(slave model.Slave) (EnvironmentReport, error) {
+	return collectSlaveExecutionEnvironment(slave)
 }
 
 func diffStringSets(base, current []string) ([]string, []string) {

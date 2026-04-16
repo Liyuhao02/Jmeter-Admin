@@ -136,11 +136,16 @@ func CheckSlave(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, model.Success(gin.H{
-		"online":       result.JMeterOnline,
-		"status":       jmeterStatus,
-		"agent_online": result.AgentOnline,
-		"agent_status": agentStatus,
-		"diagnostic":   result,
+		"online":           result.JMeterOnline,
+		"status":           jmeterStatus,
+		"agent_online":     result.AgentOnline,
+		"agent_status":     agentStatus,
+		"last_check_time":  result.LastCheckTime,
+		"agent_check_time": result.AgentCheckTime,
+		"system_stats":     result.SystemStats,
+		"environment_info": result.EnvironmentInfo,
+		"agent_uptime":     result.AgentUptime,
+		"diagnostic":       result,
 	}))
 }
 
@@ -258,33 +263,35 @@ func GetHeartbeatStatus(c *gin.Context) {
 
 	// 构建心跳状态列表
 	type HeartbeatInfo struct {
-		ID             int64  `json:"id"`
-		Name           string `json:"name"`
-		Host           string `json:"host"`
-		Port           int    `json:"port"`
-		Status         string `json:"status"`
-		AgentPort      int    `json:"agent_port"`
-		AgentStatus    string `json:"agent_status"`
-		LastCheckTime  string `json:"last_check_time"`
-		AgentCheckTime string `json:"agent_check_time"`
-		SystemStats    string `json:"system_stats"`
-		AgentUptime    int64  `json:"agent_uptime"`
+		ID              int64  `json:"id"`
+		Name            string `json:"name"`
+		Host            string `json:"host"`
+		Port            int    `json:"port"`
+		Status          string `json:"status"`
+		AgentPort       int    `json:"agent_port"`
+		AgentStatus     string `json:"agent_status"`
+		LastCheckTime   string `json:"last_check_time"`
+		AgentCheckTime  string `json:"agent_check_time"`
+		SystemStats     string `json:"system_stats"`
+		EnvironmentInfo string `json:"environment_info"`
+		AgentUptime     int64  `json:"agent_uptime"`
 	}
 
 	var heartbeatList []HeartbeatInfo
 	for _, slave := range slaves {
 		heartbeatList = append(heartbeatList, HeartbeatInfo{
-			ID:             slave.ID,
-			Name:           slave.Name,
-			Host:           slave.Host,
-			Port:           slave.Port,
-			Status:         slave.Status,
-			AgentPort:      slave.AgentPort,
-			AgentStatus:    slave.AgentStatus,
-			LastCheckTime:  slave.LastCheckTime,
-			AgentCheckTime: slave.AgentCheckTime,
-			SystemStats:    slave.SystemStats,
-			AgentUptime:    slave.AgentUptime,
+			ID:              slave.ID,
+			Name:            slave.Name,
+			Host:            slave.Host,
+			Port:            slave.Port,
+			Status:          slave.Status,
+			AgentPort:       slave.AgentPort,
+			AgentStatus:     slave.AgentStatus,
+			LastCheckTime:   slave.LastCheckTime,
+			AgentCheckTime:  slave.AgentCheckTime,
+			SystemStats:     slave.SystemStats,
+			EnvironmentInfo: slave.EnvironmentInfo,
+			AgentUptime:     slave.AgentUptime,
 		})
 	}
 
@@ -293,16 +300,19 @@ func GetHeartbeatStatus(c *gin.Context) {
 		masterHost = "localhost"
 	}
 
+	masterEnvironment := service.GetLocalEnvironmentReport()
+
 	c.JSON(http.StatusOK, model.Success(gin.H{
 		"master": gin.H{
-			"id":            0,
-			"name":          "Master",
-			"host":          masterHost,
-			"status":        "online",
-			"agent_status":  "online",
-			"system_stats":  collectMasterSystemStats(),
-			"agent_uptime":  0,
-			"last_check_time": time.Now().Format("2006-01-02 15:04:05"),
+			"id":               0,
+			"name":             "Master",
+			"host":             masterHost,
+			"status":           "online",
+			"agent_status":     "online",
+			"system_stats":     collectMasterSystemStats(),
+			"environment_info": masterEnvironment,
+			"agent_uptime":     0,
+			"last_check_time":  time.Now().Format("2006-01-02 15:04:05"),
 		},
 		"slaves":          heartbeatList,
 		"check_interval":  30,

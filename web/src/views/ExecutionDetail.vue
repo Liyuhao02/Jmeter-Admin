@@ -1645,8 +1645,8 @@ const reconnectAttempts = ref(0)
 const maxReconnectAttempts = 5
 const detailReconnectAttempts = ref(0)
 const maxDetailReconnectAttempts = 6
-const DETAIL_STREAM_STALE_MS = 1400
-const DETAIL_STREAM_RECONNECT_MS = 4200
+const DETAIL_STREAM_STALE_MS = 3200
+const DETAIL_STREAM_RECONNECT_MS = 9000
 const MAX_LOG_LINES = 600
 const LOG_FLUSH_INTERVAL = 300
 

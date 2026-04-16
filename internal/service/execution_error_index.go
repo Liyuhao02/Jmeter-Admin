@@ -58,6 +58,10 @@ func saveIndexedErrorAnalysis(resultPath, signature string, analysis *ErrorAnaly
 }
 
 func refreshExecutionErrorAnalysisIndex(execID int64, logWriter io.Writer) {
+	execution, err := GetExecution(execID)
+	if err == nil && execution != nil && execution.Status == "running" {
+		return
+	}
 	if _, err := GetExecutionErrors(execID); err != nil && logWriter != nil {
 		fmt.Fprintf(logWriter, "[执行 #%d] 刷新错误分析索引失败: %v\n", execID, err)
 	}

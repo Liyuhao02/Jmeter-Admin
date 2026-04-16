@@ -33,15 +33,21 @@ import (
 
 func isTransactionSample(label, url, responseMessage string) bool {
 	normalizedURL := strings.TrimSpace(strings.ToLower(url))
-	if normalizedURL == "" || normalizedURL == "null" {
-		return true
-	}
 	normalizedLabel := strings.TrimSpace(strings.ToLower(label))
-	if strings.Contains(normalizedLabel, "事务控制器") || strings.Contains(normalizedLabel, "transaction") {
+	normalizedMessage := strings.TrimSpace(strings.ToLower(responseMessage))
+
+	if strings.Contains(normalizedMessage, "number of samples in transaction") ||
+		strings.Contains(normalizedMessage, "samples in transaction") {
 		return true
 	}
-	normalizedMessage := strings.TrimSpace(strings.ToLower(responseMessage))
-	return strings.Contains(normalizedMessage, "number of samples in transaction")
+
+	if normalizedURL != "" && normalizedURL != "null" {
+		return false
+	}
+
+	return strings.Contains(normalizedLabel, "事务控制器") ||
+		strings.Contains(normalizedLabel, "transaction controller") ||
+		strings.HasPrefix(normalizedLabel, "transaction")
 }
 
 func isRequestSample(url string) bool {
@@ -1125,7 +1131,7 @@ func GetExecutionLiveMetrics(id int64) (*LiveExecutionMetrics, error) {
 		return &LiveExecutionMetrics{Status: execution.Status, Points: []LiveMetricPoint{}}, nil
 	}
 
-	resultPaths := discoverExecutionResultPaths(resultPath)
+	resultPaths := discoverExecutionLiveResultPaths(resultPath, execution.Status == "running")
 	if len(resultPaths) == 0 {
 		return &LiveExecutionMetrics{Status: execution.Status, Points: []LiveMetricPoint{}}, nil
 	}
@@ -2284,6 +2290,30 @@ func discoverExecutionResultPaths(resultPath string) []string {
 	return paths
 }
 
+func discoverExecutionLiveResultPaths(resultPath string, running bool) []string {
+	if !running {
+		return discoverExecutionResultPaths(resultPath)
+	}
+
+	baseDir := filepath.Dir(resultPath)
+	splitCandidates := []string{
+		filepath.Join(baseDir, "result-local.jtl"),
+		filepath.Join(baseDir, "result-remote.jtl"),
+	}
+
+	paths := make([]string, 0, len(splitCandidates))
+	for _, candidate := range splitCandidates {
+		if info, err := os.Stat(candidate); err == nil && info.Size() > 0 {
+			paths = append(paths, candidate)
+		}
+	}
+	if len(paths) > 0 {
+		return paths
+	}
+
+	return discoverExecutionResultPaths(resultPath)
+}
+
 func buildResponsePreview(responseData, failureMessage string) string {
 	preview := strings.TrimSpace(responseData)
 	if preview == "" {
@@ -3427,17 +3457,24 @@ func GetExecutionErrors(execID int64) (*ErrorAnalysis, error) {
 	}
 
 	resultPaths := discoverExecutionResultPaths(resultPath)
-	if len(resultPaths) > 1 {
-		if info, statErr := os.Stat(resultPath); statErr != nil || info.Size() == 0 {
-			if mergeErr := mergeJTLFiles(resultPaths, resultPath); mergeErr != nil {
-				fmt.Printf("[JTL合并][警告] 错误分析自动合并失败: %v\n", mergeErr)
-				resultPath = resultPaths[0]
+	if execution != nil && execution.Status == "running" {
+		liveResultPaths := discoverExecutionLiveResultPaths(resultPath, true)
+		if len(liveResultPaths) > 0 {
+			resultPath = liveResultPaths[0]
+		}
+	} else {
+		if len(resultPaths) > 1 {
+			if info, statErr := os.Stat(resultPath); statErr != nil || info.Size() == 0 {
+				if mergeErr := mergeJTLFiles(resultPaths, resultPath); mergeErr != nil {
+					fmt.Printf("[JTL合并][警告] 错误分析自动合并失败: %v\n", mergeErr)
+					resultPath = resultPaths[0]
+				}
 			}
 		}
-	}
-	if len(resultPaths) > 0 {
-		if info, statErr := os.Stat(resultPath); statErr != nil || info.Size() == 0 {
-			resultPath = resultPaths[0]
+		if len(resultPaths) > 0 {
+			if info, statErr := os.Stat(resultPath); statErr != nil || info.Size() == 0 {
+				resultPath = resultPaths[0]
+			}
 		}
 	}
 

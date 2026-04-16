@@ -79,7 +79,7 @@ const route = useRoute()
 
 const tabs = [
   { name: '脚本管理', path: '/scripts', icon: Document },
-  { name: 'Slave管理', path: '/slaves', icon: Monitor },
+  { name: '节点管理', path: '/slaves', icon: Monitor },
   { name: '执行记录', path: '/executions', icon: DataLine }
 ]
 

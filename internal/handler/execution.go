@@ -192,9 +192,12 @@ func GetExecutionStream(c *gin.Context) {
 			liveMetrics = &service.LiveExecutionMetrics{Status: execution.Status, Points: []service.LiveMetricPoint{}}
 		}
 
-		errorOverview, overviewErr := service.GetExecutionErrorOverview(id)
-		if overviewErr != nil {
-			errorOverview = nil
+		var errorOverview interface{}
+		if execution.Status != "running" {
+			overview, overviewErr := service.GetExecutionErrorOverview(id)
+			if overviewErr == nil {
+				errorOverview = overview
+			}
 		}
 
 		if forceNodeRefresh || lastNodeFetch.IsZero() || time.Since(lastNodeFetch) >= 3*time.Second {
@@ -205,13 +208,13 @@ func GetExecutionStream(c *gin.Context) {
 			}
 		}
 
-		c.SSEvent("snapshot", gin.H{
-			"server_time":    time.Now().Format("2006-01-02 15:04:05"),
-			"execution":      execution,
-			"live_metrics":   liveMetrics,
-			"error_overview": errorOverview,
-			"node_metrics":   cachedNodes,
-		})
+			c.SSEvent("snapshot", gin.H{
+				"server_time":    time.Now().Format("2006-01-02 15:04:05"),
+				"execution":      execution,
+				"live_metrics":   liveMetrics,
+				"error_overview": errorOverview,
+				"node_metrics":   cachedNodes,
+			})
 		flusher.Flush()
 
 		if execution.Status != "running" {
@@ -991,6 +994,7 @@ func collectExecutionNodeMetricsData(execution *model.Execution) ([]gin.H, error
 
 	nodes := []gin.H{}
 	masterStats := collectMasterSystemStats()
+	masterEnvironment := service.GetLocalEnvironmentReport()
 	masterHost := config.GlobalConfig.JMeter.MasterHostname
 	if masterHost == "" {
 		masterHost = "localhost"
@@ -1010,6 +1014,7 @@ func collectExecutionNodeMetricsData(execution *model.Execution) ([]gin.H, error
 		"agent_status": "online",
 		"participating": masterParticipating,
 		"system_stats": masterStats,
+		"environment_info": masterEnvironment,
 	})
 
 	for _, sid := range slaveIDs {
@@ -1017,11 +1022,12 @@ func collectExecutionNodeMetricsData(execution *model.Execution) ([]gin.H, error
 		var lastCheckTime sql.NullString
 		var agentCheckTime sql.NullString
 		var systemStats sql.NullString
+		var environmentInfo sql.NullString
 		var agentStatus sql.NullString
 		err := database.DB.QueryRow(
-			"SELECT id, name, host, port, status, agent_status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, agent_uptime, created_at FROM slaves WHERE id = ?",
+			"SELECT id, name, host, port, status, agent_status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, environment_info, agent_uptime, created_at FROM slaves WHERE id = ?",
 			sid,
-		).Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &agentStatus, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &slave.AgentUptime, &slave.CreatedAt)
+		).Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &agentStatus, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &environmentInfo, &slave.AgentUptime, &slave.CreatedAt)
 
 		if err != nil {
 			// Slave 不存在，跳过
@@ -1036,6 +1042,9 @@ func collectExecutionNodeMetricsData(execution *model.Execution) ([]gin.H, error
 		}
 		if systemStats.Valid {
 			slave.SystemStats = systemStats.String
+		}
+		if environmentInfo.Valid {
+			slave.EnvironmentInfo = environmentInfo.String
 		}
 		if agentStatus.Valid {
 			slave.AgentStatus = agentStatus.String
@@ -1056,6 +1065,7 @@ func collectExecutionNodeMetricsData(execution *model.Execution) ([]gin.H, error
 			"agent_uptime":  result.AgentUptime,
 			"participating": true,
 			"system_stats":  result.SystemStats,
+			"environment_info": slave.EnvironmentInfo,
 		})
 	}
 

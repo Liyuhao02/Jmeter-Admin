@@ -41,6 +41,7 @@ type Slave struct {
 	LastCheckTime  string `json:"last_check_time"`
 	AgentCheckTime string `json:"agent_check_time"`       // Agent 最后检测时间
 	SystemStats    string `json:"system_stats,omitempty"` // JSON 格式存储
+	EnvironmentInfo string `json:"environment_info,omitempty"` // JSON 格式存储环境检测结果
 	AgentUptime    int64  `json:"agent_uptime,omitempty"` // Agent 运行秒数
 	CreatedAt      string `json:"created_at"`
 }

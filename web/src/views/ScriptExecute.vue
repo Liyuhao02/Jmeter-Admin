@@ -235,6 +235,8 @@
                 <span class="slave-badge">{{ formatPercent(getStatsValue(slave, 'cpu')) }} CPU</span>
                 <span class="slave-badge">{{ formatPercent(getStatsValue(slave, 'memory')) }} 内存</span>
                 <span class="slave-badge">{{ formatCount(getConnections(slave)) }} 连接</span>
+                <span class="slave-badge" :class="`is-${getEnvironmentTone(slave)}`">{{ getEnvironmentStatusTag(slave) }}</span>
+                <span class="slave-badge" v-if="getEnvironmentVersion(slave)">{{ getEnvironmentVersion(slave) }}</span>
               </div>
               <div class="slave-select-footer">
                 <span>{{ selectedSlaves.includes(slave.id) ? '已加入本次执行' : '点击加入本次执行' }}</span>
@@ -243,7 +245,7 @@
             </button>
 
             <div v-if="!loadingSlaves && !slaveNodes.length" class="empty-panel">
-              暂无 Slave 节点，请先到 Slave 管理页添加并检测节点。
+              暂无 Slave 节点，请先到节点管理页添加并检测节点。
             </div>
           </div>
         </section>
@@ -361,6 +363,14 @@
                   <strong>{{ formatPercent(getStatsValue(masterNode, 'disk')) }}</strong>
                 </div>
               </div>
+              <div class="node-env-strip">
+                <span class="node-env-badge" :class="`is-${getEnvironmentTone(masterNode)}`">{{ getEnvironmentStatusTag(masterNode) }}</span>
+                <span class="node-env-badge" v-if="getEnvironmentVersion(masterNode)">{{ getEnvironmentVersion(masterNode) }}</span>
+                <span class="node-env-badge">{{ getPluginCountLabel(masterNode) }}</span>
+              </div>
+              <div v-if="getEnvironmentWarnings(masterNode).length" class="node-env-note">
+                {{ getEnvironmentWarnings(masterNode)[0] }}
+              </div>
             </article>
 
             <template v-if="executionMode === 'distributed'">
@@ -392,6 +402,14 @@
                     <span>内存 {{ formatPercent(getStatsValue(slave, 'memory')) }}</span>
                     <span>磁盘 {{ formatPercent(getStatsValue(slave, 'disk')) }}</span>
                     <span>连接 {{ formatCount(getConnections(slave)) }}</span>
+                  </div>
+                  <div class="node-env-strip compact">
+                    <span class="node-env-badge" :class="`is-${getEnvironmentTone(slave)}`">{{ getEnvironmentStatusTag(slave) }}</span>
+                    <span class="node-env-badge" v-if="getEnvironmentVersion(slave)">{{ getEnvironmentVersion(slave) }}</span>
+                    <span class="node-env-badge">{{ getPluginCountLabel(slave) }}</span>
+                  </div>
+                  <div v-if="getEnvironmentWarnings(slave).length" class="node-env-note">
+                    {{ getEnvironmentWarnings(slave)[0] }}
                   </div>
                 </article>
               </div>
@@ -658,11 +676,25 @@ const parseSystemStats = (node) => {
   return node.system_stats || null
 }
 
+const parseEnvironmentInfo = (node) => {
+  if (!node) return null
+  if (typeof node.environment_info === 'string') {
+    try {
+      return node.environment_info ? JSON.parse(node.environment_info) : null
+    } catch {
+      return null
+    }
+  }
+  return node.environment_info || null
+}
+
 const normalizeNode = (node) => {
   const stats = parseSystemStats(node)
+  const env = parseEnvironmentInfo(node)
   return {
     ...node,
-    parsedStats: stats
+    parsedStats: stats,
+    parsedEnvironment: env
   }
 }
 
@@ -672,6 +704,34 @@ const getStatsValue = (node, type) => {
 
 const getConnections = (node) => {
   return Number(node?.parsedStats?.network?.connections || 0)
+}
+
+const getEnvironmentWarnings = (node) => {
+  const warnings = node?.parsedEnvironment?.warnings
+  return Array.isArray(warnings) ? warnings.filter(Boolean) : []
+}
+
+const getEnvironmentVersion = (node) => {
+  return node?.parsedEnvironment?.jmeter_version || ''
+}
+
+const getPluginCountLabel = (node) => {
+  const count = node?.parsedEnvironment?.plugin_jars?.length || 0
+  return count ? `插件 ${count} 个` : '插件未采集'
+}
+
+const getEnvironmentTone = (node) => {
+  if (!node?.parsedEnvironment) return 'neutral'
+  if (!getEnvironmentVersion(node)) return 'danger'
+  if (getEnvironmentWarnings(node).length) return 'warning'
+  return 'success'
+}
+
+const getEnvironmentStatusTag = (node) => {
+  if (!node?.parsedEnvironment) return '未检测'
+  if (!getEnvironmentVersion(node)) return '未安装 JMeter'
+  if (getEnvironmentWarnings(node).length) return '需关注'
+  return '环境正常'
 }
 
 const formatPercent = (value) => {
@@ -1523,6 +1583,27 @@ onMounted(async () => {
   color: var(--text-secondary);
 }
 
+.slave-badge.is-success,
+.node-env-badge.is-success {
+  color: #4ade80;
+  border-color: rgba(74, 222, 128, 0.2);
+  background: rgba(74, 222, 128, 0.08);
+}
+
+.slave-badge.is-warning,
+.node-env-badge.is-warning {
+  color: #f8d27a;
+  border-color: rgba(245, 158, 11, 0.2);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.slave-badge.is-danger,
+.node-env-badge.is-danger {
+  color: #ff8e87;
+  border-color: rgba(239, 68, 68, 0.2);
+  background: rgba(239, 68, 68, 0.08);
+}
+
 .slave-status.is-warning {
   background: rgba(255, 149, 0, 0.12);
   color: #ffcc7a;
@@ -1870,6 +1951,38 @@ onMounted(async () => {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.node-env-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+
+  &.compact {
+    margin-top: 8px;
+  }
+}
+
+.node-env-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.node-env-note {
+  margin-top: 10px;
+  color: #f8d27a;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .remove-node-btn {

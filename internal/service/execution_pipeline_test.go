@@ -364,9 +364,9 @@ func TestParseJTLResultsPrefersTransactionThroughput(t *testing.T) {
 	content := strings.Join([]string{
 		"timeStamp,elapsed,label,responseCode,responseMessage,threadName,dataType,success,failureMessage,bytes,sentBytes,grpThreads,allThreads,URL,Latency,Encoding,IdleTime,Connect",
 		"1000,100,HTTP Request,200,OK,t1,text,true,,10,1,1,1,https://example.com/api,5,utf-8,0,1",
-		"1000,100,事务控制器,200,OK,t1,text,true,,10,1,1,1,,5,utf-8,0,1",
+		"1000,100,事务控制器,200,\"Number of samples in transaction : 1, number of failing samples : 0\",t1,text,true,,10,1,1,1,,5,utf-8,0,1",
 		"2000,100,HTTP Request,200,OK,t1,text,true,,10,1,1,1,https://example.com/api,5,utf-8,0,1",
-		"2000,100,事务控制器,200,OK,t1,text,true,,10,1,1,1,,5,utf-8,0,1",
+		"2000,100,事务控制器,200,\"Number of samples in transaction : 1, number of failing samples : 0\",t1,text,true,,10,1,1,1,,5,utf-8,0,1",
 	}, "\n") + "\n"
 	if err := os.WriteFile(resultPath, []byte(content), 0644); err != nil {
 		t.Fatalf("write result file: %v", err)
@@ -398,6 +398,40 @@ func TestParseJTLResultsPrefersTransactionThroughput(t *testing.T) {
 	samplerStats, ok := summary["sampler_stats"].([]interface{})
 	if !ok || len(samplerStats) == 0 {
 		t.Fatalf("expected sampler_stats in summary, got %v", summary["sampler_stats"])
+	}
+}
+
+func TestParseJTLResultsDoesNotTreatBlankURLAsTransactionByDefault(t *testing.T) {
+	dir := t.TempDir()
+	resultPath := filepath.Join(dir, "result.jtl")
+	content := strings.Join([]string{
+		"timeStamp,elapsed,label,responseCode,responseMessage,threadName,dataType,success,failureMessage,bytes,sentBytes,grpThreads,allThreads,URL,Latency,Encoding,IdleTime,Connect",
+		"1000,120,Debug Sample,200,OK,t1,text,true,,10,1,1,1,,5,utf-8,0,1",
+		"2000,100,HTTP Request,200,OK,t1,text,true,,10,1,1,1,https://example.com/api,5,utf-8,0,1",
+		"3000,90,HTTP Request,200,OK,t1,text,true,,10,1,1,1,https://example.com/api2,5,utf-8,0,1",
+	}, "\n") + "\n"
+	if err := os.WriteFile(resultPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write result file: %v", err)
+	}
+
+	summaryJSON, err := parseJTLResults(resultPath)
+	if err != nil {
+		t.Fatalf("parseJTLResults failed: %v", err)
+	}
+
+	var summary map[string]interface{}
+	if err := json.Unmarshal([]byte(summaryJSON), &summary); err != nil {
+		t.Fatalf("unmarshal summary: %v", err)
+	}
+
+	if got := summary["primary_throughput_field"]; got != "request_rate" {
+		t.Fatalf("expected request_rate, got %v", got)
+	}
+	if got := int(summary["transaction_samples"].(float64)); got != 0 {
+		t.Fatalf("expected 0 transaction samples, got %d", got)
+	}
+	if got := int(summary["request_samples"].(float64)); got != 2 {
+		t.Fatalf("expected 2 request samples, got %d", got)
 	}
 }
 

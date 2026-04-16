@@ -258,6 +258,15 @@ func migrateSlavesTable() error {
 		}
 	}
 
+	// 添加 environment_info 列
+	var environmentInfoExists int
+	err = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('slaves') WHERE name='environment_info'").Scan(&environmentInfoExists)
+	if err == nil && environmentInfoExists == 0 {
+		if _, err := DB.Exec("ALTER TABLE slaves ADD COLUMN environment_info TEXT DEFAULT ''"); err != nil {
+			return fmt.Errorf("添加 environment_info 列失败: %w", err)
+		}
+	}
+
 	// 添加 agent_uptime 列
 	var agentUptimeExists int
 	err = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('slaves') WHERE name='agent_uptime'").Scan(&agentUptimeExists)

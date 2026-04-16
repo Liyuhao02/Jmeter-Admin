@@ -1,17 +1,16 @@
 <template>
   <div class="slave-page">
-    <section class="workspace-hero">
-      <div class="workspace-hero-main">
-        <div class="workspace-copy">
-          <div class="workspace-kicker">WORKSPACE</div>
-          <h1>Slave 管理</h1>
-          <p>统一维护 Master 回调地址、节点在线状态和资源健康度，让分布式执行的链路在开始前就清清楚楚。</p>
-        </div>
-        <div class="workspace-hero-pills">
-          <span class="workspace-pill">在线 {{ onlineSlaveCount }} / {{ slaveList.length }}</span>
-          <span class="workspace-pill">Agent 在线 {{ agentOnlineCount }}</span>
-          <span class="workspace-pill">高负载 {{ busySlaveCount }}</span>
-        </div>
+    <section class="page-header-bar">
+      <div class="page-header-copy">
+        <div class="page-header-kicker">CLUSTER</div>
+        <h1>节点管理</h1>
+        <p>集中查看节点状态、环境差异和分布式执行可用性。</p>
+      </div>
+      <div class="page-header-pills">
+        <span class="workspace-pill">节点 {{ slaveList.length }}</span>
+        <span class="workspace-pill">在线 {{ onlineSlaveCount }}</span>
+        <span class="workspace-pill">Agent {{ agentOnlineCount }}</span>
+        <span class="workspace-pill">高负载 {{ busySlaveCount }}</span>
       </div>
     </section>
 
@@ -22,9 +21,14 @@
           <el-icon class="title-icon"><Connection /></el-icon>
           <span>Master 节点配置</span>
         </div>
-        <el-tooltip content="Slave 节点通过此 IP 将测试结果回传给 Master，多网卡环境需指定正确的 IP" placement="top">
-          <el-icon class="info-icon"><InfoFilled /></el-icon>
-        </el-tooltip>
+        <div class="master-config-meta">
+          <span class="env-chip" :class="`is-${getEnvironmentTone(masterNode)}`">{{ getEnvironmentStatusTag(masterNode) }}</span>
+          <span class="env-chip" v-if="getEnvironmentVersion(masterNode)">{{ getEnvironmentVersion(masterNode) }}</span>
+          <span class="env-chip subtle">心跳 {{ lastHeartbeatTime || '等待检测' }}</span>
+          <el-tooltip content="Slave 节点通过此 IP 将测试结果回传给 Master，多网卡环境需指定正确的 IP" placement="top">
+            <el-icon class="info-icon"><InfoFilled /></el-icon>
+          </el-tooltip>
+        </div>
       </div>
       <div class="master-config-body">
         <div class="config-item">
@@ -58,26 +62,87 @@
         </div>
       </div>
 
-      <div class="master-overview-grid">
-        <div class="master-overview-card is-callback">
-          <span class="overview-card-label">Master 回调基地址</span>
-          <code class="overview-card-code">{{ masterCallbackBaseURL || '未配置' }}</code>
+      <div class="master-dashboard">
+        <div class="master-primary-panel">
+          <div class="master-overview-card is-callback">
+            <span class="overview-card-label">Master 回调基地址</span>
+            <code class="overview-card-code">{{ masterCallbackBaseURL || '未配置' }}</code>
+          </div>
+          <div class="master-overview-grid">
+            <div class="master-overview-card">
+              <span class="overview-card-label">CPU</span>
+              <strong class="overview-card-value">{{ formatPercent(masterNode.parsedStats?.cpu?.percent) }}</strong>
+            </div>
+            <div class="master-overview-card">
+              <span class="overview-card-label">内存</span>
+              <strong class="overview-card-value">{{ formatPercent(masterNode.parsedStats?.memory?.percent) }}</strong>
+            </div>
+            <div class="master-overview-card">
+              <span class="overview-card-label">磁盘</span>
+              <strong class="overview-card-value">{{ formatPercent(masterNode.parsedStats?.disk?.percent) }}</strong>
+            </div>
+            <div class="master-overview-card">
+              <span class="overview-card-label">连接</span>
+              <strong class="overview-card-value">{{ formatCount(masterNode.parsedStats?.network?.connections) }}</strong>
+            </div>
+          </div>
         </div>
-        <div class="master-overview-card">
-          <span class="overview-card-label">在线节点</span>
-          <strong class="overview-card-value">{{ onlineSlaveCount }} / {{ slaveList.length }}</strong>
+
+        <div class="master-env-panel" :class="`is-${getEnvironmentTone(masterNode)}`">
+          <div class="master-env-summary">
+            <div class="master-env-copy">
+              <span class="master-env-label">Master 环境检测</span>
+              <strong>{{ getEnvironmentHeadline(masterNode) }}</strong>
+              <p>{{ getEnvironmentDescription(masterNode) }}</p>
+            </div>
+            <div class="master-env-badges">
+              <span class="env-badge" :class="`is-${getEnvironmentTone(masterNode)}`">{{ getEnvironmentStatusTag(masterNode) }}</span>
+              <span class="env-badge" v-if="getEnvironmentVersion(masterNode)">{{ getEnvironmentVersion(masterNode) }}</span>
+            </div>
+          </div>
+
+          <div class="master-env-grid">
+            <div class="master-env-card">
+              <span>JMeter</span>
+              <strong>{{ getEnvironmentVersion(masterNode) || '未检测到' }}</strong>
+            </div>
+            <div class="master-env-card">
+              <span>插件</span>
+              <strong>{{ getPluginCountLabel(masterNode) }}</strong>
+            </div>
+            <div class="master-env-card">
+              <span>配置</span>
+              <strong>{{ getPropertiesStateLabel(masterNode) }}</strong>
+            </div>
+            <div class="master-env-card">
+              <span>告警</span>
+              <strong>{{ getEnvironmentWarnings(masterNode).length }} 条</strong>
+            </div>
+          </div>
+
+          <div v-if="getEnvironmentWarnings(masterNode).length" class="master-env-warning-list">
+            <div
+              v-for="(warning, index) in getEnvironmentWarnings(masterNode).slice(0, 2)"
+              :key="`master-warning-${index}`"
+              class="master-env-warning"
+            >
+              <el-icon><WarningFilled /></el-icon>
+              <span>{{ warning }}</span>
+            </div>
+          </div>
         </div>
-        <div class="master-overview-card">
-          <span class="overview-card-label">Agent 在线</span>
-          <strong class="overview-card-value">{{ agentOnlineCount }}</strong>
-        </div>
-        <div class="master-overview-card">
-          <span class="overview-card-label">平均 CPU</span>
-          <strong class="overview-card-value">{{ averageCpuText }}</strong>
-        </div>
-        <div class="master-overview-card">
-          <span class="overview-card-label">高负载节点</span>
-          <strong class="overview-card-value">{{ busySlaveCount }}</strong>
+      </div>
+
+      <div v-if="clusterAdvisories.length" class="cluster-alert-strip">
+        <div
+          v-for="(advice, index) in clusterAdvisories.slice(0, 4)"
+          :key="`cluster-advice-${index}`"
+          class="cluster-alert-card"
+          :class="`is-${advice.tone}`"
+        >
+          <span class="cluster-alert-label">{{ advice.label }}</span>
+          <strong>{{ advice.title }}</strong>
+          <p>{{ advice.detail }}</p>
         </div>
       </div>
 
@@ -99,8 +164,8 @@
       <div class="section-header-with-action">
         <div class="section-header">
           <div class="section-label">NODES</div>
-          <div class="section-title">节点管理</div>
-          <div class="section-desc">管理分布式执行的Slave节点</div>
+          <div class="section-title">节点列表</div>
+          <div class="section-desc">查看每个节点的连通性、资源负载、JMeter 安装版本与环境告警</div>
         </div>
         <div class="section-actions">
           <el-button @click="handleCheckAll" :loading="checkingAll">
@@ -117,7 +182,10 @@
       <div class="list-utility-bar">
         <span class="utility-chip">共 {{ slaveList.length }} 个节点</span>
         <span class="utility-chip">在线 {{ onlineSlaveCount }} 个</span>
-        <span class="utility-chip">每 30 秒自动检测一次</span>
+        <span class="utility-chip">Agent 在线 {{ agentOnlineCount }} 个</span>
+        <span class="utility-chip">平均 CPU {{ averageCpuText }}</span>
+        <span class="utility-chip">高负载 {{ busySlaveCount }} 个</span>
+        <span class="utility-chip">环境差异 {{ conflictNodeCount }} 个</span>
       </div>
 
       <!-- 节点表格 -->
@@ -128,99 +196,81 @@
           class="slaves-table"
           stripe
         >
-        <el-table-column label="名称" min-width="140" sortable prop="name" show-overflow-tooltip>
+        <el-table-column label="名称" min-width="156" sortable prop="name" show-overflow-tooltip>
           <template #default="{ row }">
             <div class="node-name-cell">
               <el-icon class="node-icon"><Monitor /></el-icon>
-              <span class="node-name">{{ row.name }}</span>
+              <div class="node-name-stack">
+                <span class="node-name">{{ row.name }}</span>
+                <span class="node-subtext">节点 #{{ row.id }}</span>
+              </div>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="主机地址" min-width="150" show-overflow-tooltip>
+        <el-table-column label="地址" min-width="200" show-overflow-tooltip>
           <template #default="{ row }">
-            <code class="address-code">{{ row.host }}</code>
-          </template>
-        </el-table-column>
-        <el-table-column label="端口" width="100" align="center">
-          <template #default="{ row }">
-            <span class="port-text">{{ row.port }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="JMeter 状态" width="140" align="center" sortable prop="status">
-          <template #default="{ row }">
-            <div class="status-cell">
-              <span class="status-dot" :class="row.status"></span>
-              <span class="status-label" :class="row.status">{{ getStatusText(row.status) }}</span>
-            </div>
-            <div v-if="row.diagnostic && row.diagnostic.jmeter_latency_ms > 0" class="latency-text">
-              {{ row.diagnostic.jmeter_latency_ms }}ms
+            <div class="node-address-stack">
+              <code class="address-code">{{ row.host }}</code>
+              <span class="node-subtext">RMI {{ row.port }} · Agent {{ row.agent_port || '--' }}</span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="Agent 状态" width="160" align="center" sortable prop="agent_status">
+        <el-table-column label="连通状态" width="180" align="center">
           <template #default="{ row }">
-            <div class="agent-status-cell">
-              <div class="status-row">
+            <div class="connectivity-cell">
+              <div class="status-cell">
+                <span class="status-dot" :class="row.status"></span>
+                <span class="status-label" :class="row.status">JMeter {{ getStatusText(row.status) }}</span>
+              </div>
+              <div class="status-cell">
                 <span class="status-dot" :class="row.agent_status || 'unknown'"></span>
-                <span class="status-label" :class="row.agent_status || 'unknown'">{{ getAgentStatusText(row.agent_status) }}</span>
+                <span class="status-label" :class="row.agent_status || 'unknown'">Agent {{ getAgentStatusText(row.agent_status) }}</span>
               </div>
-              <div v-if="row.diagnostic && row.diagnostic.agent_latency_ms > 0" class="latency-text">
-                {{ row.diagnostic.agent_latency_ms }}ms
-              </div>
-              <div class="agent-check-time" v-else-if="row.agent_check_time">
-                {{ formatRelativeTime(row.agent_check_time) }}
-              </div>
+            </div>
+            <div v-if="row.diagnostic && (row.diagnostic.jmeter_latency_ms > 0 || row.diagnostic.agent_latency_ms > 0)" class="latency-text">
+              {{ row.diagnostic.jmeter_latency_ms || '--' }}ms / {{ row.diagnostic.agent_latency_ms || '--' }}ms
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="资源使用" width="180" sortable :sort-method="(a,b) => sortByStats(a,b,'cpu')">
+        <el-table-column label="资源概览" width="210" sortable :sort-method="(a,b) => sortByStats(a,b,'cpu')">
           <template #default="{ row }">
             <div v-if="row.parsedStats" class="resource-cell">
-              <div class="resource-row">
-                <span class="resource-label">CPU</span>
-                <el-progress
-                  :percentage="row.parsedStats.cpu?.percent || 0"
-                  :stroke-width="4"
-                  :color="getResourceColor(row.parsedStats.cpu?.percent || 0, 80)"
-                  :show-text="false"
-                  class="resource-progress"
-                />
-                <span class="resource-value">{{ (row.parsedStats.cpu?.percent || 0).toFixed(0) }}%</span>
-              </div>
-              <div class="resource-row">
-                <span class="resource-label">内存</span>
-                <el-progress
-                  :percentage="row.parsedStats.memory?.percent || 0"
-                  :stroke-width="4"
-                  :color="getResourceColor(row.parsedStats.memory?.percent || 0, 85)"
-                  :show-text="false"
-                  class="resource-progress"
-                />
-                <span class="resource-value">{{ (row.parsedStats.memory?.percent || 0).toFixed(0) }}%</span>
-              </div>
-              <div class="resource-row">
-                <span class="resource-label">磁盘</span>
-                <el-progress
-                  :percentage="row.parsedStats.disk?.percent || 0"
-                  :stroke-width="4"
-                  :color="getResourceColor(row.parsedStats.disk?.percent || 0, 90)"
-                  :show-text="false"
-                  class="resource-progress"
-                />
-                <span class="resource-value">{{ (row.parsedStats.disk?.percent || 0).toFixed(0) }}%</span>
-              </div>
+              <span class="resource-badge">CPU {{ (row.parsedStats.cpu?.percent || 0).toFixed(0) }}%</span>
+              <span class="resource-badge">内存 {{ (row.parsedStats.memory?.percent || 0).toFixed(0) }}%</span>
+              <span class="resource-badge">磁盘 {{ (row.parsedStats.disk?.percent || 0).toFixed(0) }}%</span>
+              <span class="resource-badge">连接 {{ formatCount(row.parsedStats.network?.connections) }}</span>
             </div>
             <span v-else class="no-data">--</span>
           </template>
         </el-table-column>
-        <el-table-column label="最后检测" width="120" align="center">
+        <el-table-column label="环境概览" min-width="280" show-overflow-tooltip>
+          <template #default="{ row }">
+            <div class="environment-cell">
+              <div class="environment-cell-top">
+                <span class="env-chip" :class="`is-${getEnvironmentTone(row)}`">{{ getEnvironmentStatusTag(row) }}</span>
+                <span class="env-chip" v-if="getEnvironmentVersion(row)">{{ getEnvironmentVersion(row) }}</span>
+                <span class="env-chip">{{ getPluginCountLabel(row) }}</span>
+              </div>
+              <div class="environment-meta">
+                <span>{{ getPropertiesStateLabel(row) }}</span>
+                <span v-if="getNodeConflictDetails(row).length" :class="`conflict-text is-${getNodeConflictTone(row)}`">
+                  {{ getNodeConflictDetails(row).length }} 项需关注
+                </span>
+              </div>
+              <div class="environment-warning-cell" :class="{ 'is-empty': !getEnvironmentWarnings(row).length }">
+                {{ getNodeConflictSummary(row) }}
+              </div>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="最后检测" width="108" align="center">
           <template #default="{ row }">
             <span class="time-text" :title="row.last_check_time">
               {{ formatRelativeTime(row.last_check_time) }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="160" fixed="right">
+        <el-table-column label="操作" width="182" align="center">
           <template #default="{ row }">
             <div class="action-btns">
               <el-tooltip content="检测连通性" placement="top">
@@ -322,7 +372,7 @@
         <div class="empty-icon">
           <el-icon><Monitor /></el-icon>
         </div>
-        <h3 class="empty-title">暂无Slave节点</h3>
+        <h3 class="empty-title">暂无节点</h3>
         <p class="empty-desc">请点击上方按钮添加节点</p>
       </div>
     </div>
@@ -495,6 +545,7 @@ const networkInterfaces = ref([])
 
 // 心跳状态
 const lastHeartbeatTime = ref('')
+const masterNode = ref({})
 
 // 表单
 const formRef = ref(null)
@@ -583,6 +634,246 @@ const parseSystemStats = (slave) => {
   return slave.system_stats || null
 }
 
+const parseEnvironmentInfo = (node) => {
+  if (!node) return null
+  if (node.environment_info && typeof node.environment_info === 'string') {
+    try {
+      return node.environment_info ? JSON.parse(node.environment_info) : null
+    } catch {
+      return null
+    }
+  }
+  return node.environment_info || null
+}
+
+const normalizeNodeRecord = (node) => ({
+  ...node,
+  parsedStats: parseSystemStats(node),
+  parsedEnvironment: parseEnvironmentInfo(node)
+})
+
+const applyNodeSnapshot = (target, snapshot = {}) => {
+  if (!target) return
+  if (snapshot.status) target.status = snapshot.status
+  if (snapshot.last_check_time) target.last_check_time = snapshot.last_check_time
+  if (snapshot.agent_status) target.agent_status = snapshot.agent_status
+  if (snapshot.agent_check_time) target.agent_check_time = snapshot.agent_check_time
+  if (Object.prototype.hasOwnProperty.call(snapshot, 'system_stats')) {
+    target.system_stats = snapshot.system_stats
+    target.parsedStats = parseSystemStats(snapshot)
+  }
+  if (Object.prototype.hasOwnProperty.call(snapshot, 'environment_info')) {
+    target.environment_info = snapshot.environment_info
+    target.parsedEnvironment = parseEnvironmentInfo(snapshot)
+  }
+  if (Object.prototype.hasOwnProperty.call(snapshot, 'agent_uptime')) {
+    target.agent_uptime = snapshot.agent_uptime
+  }
+}
+
+const getEnvironmentWarnings = (node) => {
+  const warnings = node?.parsedEnvironment?.warnings
+  return Array.isArray(warnings) ? warnings.filter(Boolean) : []
+}
+
+const getEnvironmentVersion = (node) => {
+  return node?.parsedEnvironment?.jmeter_version || ''
+}
+
+const getPluginCountLabel = (node) => {
+  const count = node?.parsedEnvironment?.plugin_jars?.length || 0
+  return count ? `插件 ${count} 个` : '插件未采集'
+}
+
+const getPropertiesStateLabel = (node) => {
+  return node?.parsedEnvironment?.properties_fingerprint ? '配置已采集' : '配置未采集'
+}
+
+const getEnvironmentTone = (node) => {
+  if (!node?.parsedEnvironment) return 'neutral'
+  if (!getEnvironmentVersion(node)) return 'danger'
+  if (getEnvironmentWarnings(node).length) return 'warning'
+  return 'success'
+}
+
+const getEnvironmentStatusTag = (node) => {
+  if (!node?.parsedEnvironment) return '未检测'
+  if (!getEnvironmentVersion(node)) return '未安装 JMeter'
+  if (getEnvironmentWarnings(node).length) return '需关注'
+  return '环境正常'
+}
+
+const getEnvironmentHeadline = (node) => {
+  if (!node?.parsedEnvironment) return '尚未采集到 Master 环境报告'
+  if (!getEnvironmentVersion(node)) return '当前 Master 未检测到可执行的 JMeter 环境'
+  return `当前 Master 已检测到 ${getEnvironmentVersion(node)}`
+}
+
+const getEnvironmentDescription = (node) => {
+  if (!node?.parsedEnvironment) return '等待心跳刷新或页面初始化后自动采集。'
+  const warnings = getEnvironmentWarnings(node)
+  if (warnings.length) return warnings[0]
+  return 'JMeter、插件指纹和 properties 指纹已采集，可作为分布式执行时的基准节点。'
+}
+
+const getStatPercent = (node, key) => {
+  const value = Number(node?.parsedStats?.[key]?.percent || 0)
+  return Number.isFinite(value) ? value : 0
+}
+
+const getConnectionCount = (node) => {
+  const value = Number(node?.parsedStats?.network?.connections || 0)
+  return Number.isFinite(value) ? value : 0
+}
+
+const getNodeConflictDetails = (node) => {
+  const details = []
+  const env = node?.parsedEnvironment
+  const masterEnv = masterNode.value?.parsedEnvironment
+
+  if (node?.status !== 'online') {
+    details.push('JMeter RMI 不可达')
+  }
+  if ((node?.agent_status || 'unknown') !== 'online') {
+    details.push('Agent 离线或未响应')
+  }
+  if (!env) {
+    details.push('未采集环境报告')
+  } else {
+    if (!getEnvironmentVersion(node)) {
+      details.push('未检测到 JMeter 版本')
+    }
+    if (masterEnv?.jmeter_version && env?.jmeter_version && env.jmeter_version !== masterEnv.jmeter_version) {
+      details.push(`JMeter 版本与 Master 不一致 (${env.jmeter_version})`)
+    }
+    if (masterEnv?.plugin_fingerprint && env?.plugin_fingerprint && env.plugin_fingerprint !== masterEnv.plugin_fingerprint) {
+      details.push('插件清单与 Master 不一致')
+    }
+    if (masterEnv?.properties_fingerprint && env?.properties_fingerprint && env.properties_fingerprint !== masterEnv.properties_fingerprint) {
+      details.push('properties 指纹与 Master 不一致')
+    }
+  }
+
+  getEnvironmentWarnings(node).forEach((warning) => details.push(warning))
+  return [...new Set(details.filter(Boolean))]
+}
+
+const getNodeConflictTone = (node) => {
+  const details = getNodeConflictDetails(node)
+  if (!details.length) return 'success'
+  if (node?.status !== 'online' || (node?.agent_status || 'unknown') !== 'online') return 'danger'
+  if (details.some(item => item.includes('不一致') || item.includes('未检测到'))) return 'warning'
+  return 'warning'
+}
+
+const getNodeConflictSummary = (node) => {
+  const details = getNodeConflictDetails(node)
+  if (!details.length) return '环境正常，可参与执行'
+  return details[0]
+}
+
+const masterPressureWarnings = computed(() => {
+  const warnings = []
+  const cpu = getStatPercent(masterNode.value, 'cpu')
+  const memory = getStatPercent(masterNode.value, 'memory')
+  const disk = getStatPercent(masterNode.value, 'disk')
+  const connections = getConnectionCount(masterNode.value)
+
+  if (!masterHostname.value) {
+    warnings.push({
+      tone: 'warning',
+      label: '回调链路',
+      title: 'Master 回调地址仍未确认',
+      detail: '多网卡环境下 Slave 可能无法把结果回传给 Master。'
+    })
+  }
+  if (cpu >= 80) {
+    warnings.push({
+      tone: 'danger',
+      label: 'Master 负载',
+      title: `CPU 已到 ${formatPercent(cpu)}`,
+      detail: 'Master 本机负载较高，继续让它参与施压可能影响结果稳定性。'
+    })
+  }
+  if (memory >= 85) {
+    warnings.push({
+      tone: 'danger',
+      label: 'Master 内存',
+      title: `内存占用 ${formatPercent(memory)}`,
+      detail: '建议先释放 Master 内存或改为仅调度，不要让它直接参与压测。'
+    })
+  }
+  if (disk >= 90) {
+    warnings.push({
+      tone: 'warning',
+      label: 'Master 磁盘',
+      title: `磁盘占用 ${formatPercent(disk)}`,
+      detail: '结果文件和日志写入可能受影响，建议先检查可用磁盘空间。'
+    })
+  }
+  if (connections >= 3000) {
+    warnings.push({
+      tone: 'warning',
+      label: 'Master 连接',
+      title: `连接数 ${formatCount(connections)}`,
+      detail: '当前连接数较高，若 Master 同时施压与回传，链路抖动概率会增加。'
+    })
+  }
+  return warnings
+})
+
+const conflictNodeCount = computed(() => {
+  return slaveList.value.filter(node => getNodeConflictDetails(node).length > 0).length
+})
+
+const clusterAdvisories = computed(() => {
+  const advices = [...masterPressureWarnings.value]
+  const offlineNodes = slaveList.value.filter(node => node.status !== 'online')
+  const agentOfflineNodes = slaveList.value.filter(node => (node.agent_status || 'unknown') !== 'online')
+  const envConflictNodes = slaveList.value.filter(node => {
+    const details = getNodeConflictDetails(node)
+    return details.some(item => item.includes('不一致') || item.includes('未采集环境报告') || item.includes('未检测到 JMeter 版本'))
+  })
+
+  if (offlineNodes.length) {
+    advices.push({
+      tone: 'warning',
+      label: '节点连通',
+      title: `${offlineNodes.length} 台节点 JMeter 不在线`,
+      detail: '这些节点当前无法参与分布式调度，建议先重新检测连通性。'
+    })
+  }
+
+  if (agentOfflineNodes.length) {
+    advices.push({
+      tone: 'warning',
+      label: 'Agent 回传',
+      title: `${agentOfflineNodes.length} 台节点 Agent 不在线`,
+      detail: '没有 Agent 的节点无法稳定回传资源监控和环境信息。'
+    })
+  }
+
+  if (envConflictNodes.length) {
+    advices.push({
+      tone: 'warning',
+      label: '环境冲突',
+      title: `${envConflictNodes.length} 台节点与 Master 存在差异`,
+      detail: '版本、插件或 properties 指纹不一致，分布式执行结果可能不可比。'
+    })
+  }
+
+  if (!advices.length) {
+    advices.push({
+      tone: 'success',
+      label: '当前集群',
+      title: 'Master 与节点状态稳定',
+      detail: '回调地址、资源负载和环境检测均处于可执行状态，可以直接开始调度。'
+    })
+  }
+
+  return advices
+})
+
 // 获取资源颜色（根据阈值）
 const getResourceColor = (percent, threshold) => {
   if (percent >= threshold + 10) return '#F56C6C'  // 红色（超严重）
@@ -603,6 +894,18 @@ const formatMB = (mb) => {
   if (!mb) return '--'
   if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB'
   return mb + ' MB'
+}
+
+const formatPercent = (value) => {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return '--'
+  return `${num.toFixed(0)}%`
+}
+
+const formatCount = (value) => {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return '--'
+  return num.toLocaleString('zh-CN')
 }
 
 // 格式化运行时长
@@ -663,11 +966,7 @@ const loadSlaves = async () => {
   try {
     const res = await slaveApi.getList()
     const data = res.data?.list || res.data || []
-    // 解析 system_stats
-    slaveList.value = data.map(s => ({
-      ...s,
-      parsedStats: parseSystemStats(s)
-    }))
+    slaveList.value = data.map(normalizeNodeRecord)
   } catch (error) {
     console.error('加载Slave列表失败:', error)
     ElMessage.error('加载Slave列表失败')
@@ -733,9 +1032,12 @@ const handleCheck = async (row) => {
     // 更新列表中的状态
     const index = slaveList.value.findIndex(s => s.id === row.id)
     if (index !== -1) {
-      slaveList.value[index].status = status
-      slaveList.value[index].agent_status = agentStatus
-      slaveList.value[index].agent_check_time = agentCheckTime
+      applyNodeSnapshot(slaveList.value[index], {
+        ...res.data,
+        status,
+        agent_status: agentStatus,
+        agent_check_time: agentCheckTime
+      })
       slaveList.value[index].diagnostic = diagnostic
     }
 
@@ -783,9 +1085,12 @@ const handleCheckAll = async () => {
       // 更新列表中的状态
       const index = slaveList.value.findIndex(s => s.id === row.id)
       if (index !== -1) {
-        slaveList.value[index].status = status
-        slaveList.value[index].agent_status = agentStatus
-        slaveList.value[index].agent_check_time = agentCheckTime
+        applyNodeSnapshot(slaveList.value[index], {
+          ...res.data,
+          status,
+          agent_status: agentStatus,
+          agent_check_time: agentCheckTime
+        })
       }
 
       if (status === 'online') {
@@ -895,20 +1200,16 @@ const handleMasterIPChange = async (val) => {
 const refreshHeartbeatStatus = async () => {
   try {
     const res = await slaveApi.getHeartbeatStatus()
+    if (res.data?.master) {
+      masterNode.value = normalizeNodeRecord(res.data.master)
+    }
     if (res.data && res.data.slaves) {
       const heartbeatData = res.data.slaves
       // 更新每个 slave 的状态和最后检测时间
       heartbeatData.forEach(hb => {
         const index = slaveList.value.findIndex(s => s.id === hb.id)
         if (index !== -1) {
-          slaveList.value[index].status = hb.status
-          slaveList.value[index].last_check_time = hb.last_check_time
-          slaveList.value[index].agent_status = hb.agent_status
-          slaveList.value[index].agent_check_time = hb.agent_check_time
-          slaveList.value[index].system_stats = hb.system_stats
-          slaveList.value[index].agent_uptime = hb.agent_uptime
-          // 同步解析 system_stats
-          slaveList.value[index].parsedStats = parseSystemStats(hb)
+          applyNodeSnapshot(slaveList.value[index], hb)
         }
       })
       // 更新最后检测时间显示
@@ -957,9 +1258,9 @@ onUnmounted(() => {
   padding: 6px 0 14px;
 }
 
-.workspace-hero {
+.page-header-bar {
   margin-bottom: 12px;
-  padding: 16px 18px;
+  padding: 12px 16px;
   border-radius: var(--radius-lg);
   border: 1px solid rgba(148, 163, 184, 0.12);
   background:
@@ -969,32 +1270,33 @@ onUnmounted(() => {
   box-shadow: 0 22px 48px rgba(2, 8, 23, 0.12);
 }
 
-.workspace-hero-main {
+.page-header-bar {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
+  flex-wrap: wrap;
 }
 
-.workspace-copy {
+.page-header-copy {
   min-width: 0;
 
   h1 {
-    margin: 6px 0 8px;
+    margin: 2px 0 6px;
     color: var(--text-primary);
     font-size: 24px;
     line-height: 1.15;
   }
 
   p {
-    max-width: 760px;
+    max-width: 640px;
     color: var(--text-secondary);
-    font-size: 13px;
-    line-height: 1.6;
+    font-size: 12px;
+    line-height: 1.5;
   }
 }
 
-.workspace-kicker {
+.page-header-kicker {
   color: var(--accent-blue);
   font-size: 12px;
   font-weight: 700;
@@ -1002,7 +1304,7 @@ onUnmounted(() => {
   text-transform: uppercase;
 }
 
-.workspace-hero-pills {
+.page-header-pills {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -1018,7 +1320,7 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(148, 163, 184, 0.12);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
 }
 
@@ -1030,7 +1332,7 @@ onUnmounted(() => {
     var(--bg-panel);
   border-radius: var(--radius-lg);
   border: 1px solid rgba(148, 163, 184, 0.14);
-  padding: 16px 18px;
+  padding: 14px 16px;
   margin-bottom: 12px;
   box-shadow:
     0 20px 44px rgba(2, 8, 23, 0.14),
@@ -1040,10 +1342,10 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-top: 16px;
-    padding-top: 16px;
+    margin-top: 12px;
+    padding-top: 12px;
     border-top: 1px solid rgba(255, 255, 255, 0.06);
-    font-size: 13px;
+    font-size: 12px;
 
     .heartbeat-indicator {
       display: flex;
@@ -1093,13 +1395,15 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 12px;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
 
     .master-config-title {
       display: flex;
       align-items: center;
       gap: 10px;
-      font-size: 16px;
+      font-size: 15px;
       font-weight: 600;
       color: var(--text-primary);
 
@@ -1121,10 +1425,17 @@ onUnmounted(() => {
     }
   }
 
+  .master-config-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
   .master-config-body {
     display: flex;
     align-items: center;
-    gap: 18px;
+    gap: 14px;
     flex-wrap: wrap;
 
     .config-item {
@@ -1135,7 +1446,7 @@ onUnmounted(() => {
       min-width: 300px;
 
       .config-label {
-        font-size: 14px;
+        font-size: 13px;
         color: var(--text-secondary);
         white-space: nowrap;
       }
@@ -1150,7 +1461,7 @@ onUnmounted(() => {
       display: flex;
       align-items: center;
       gap: 6px;
-      font-size: 13px;
+      font-size: 12px;
 
       .status-icon {
         font-size: 14px;
@@ -1176,17 +1487,29 @@ onUnmounted(() => {
     }
   }
 
+  .master-dashboard {
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.95fr);
+    gap: 10px;
+    margin-top: 10px;
+  }
+
+  .master-primary-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
   .master-overview-grid {
     display: grid;
-    grid-template-columns: minmax(0, 1.8fr) repeat(4, minmax(0, 1fr));
-    gap: 12px;
-    margin-top: 12px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
   }
 
   .master-overview-card {
-    min-height: 74px;
-    padding: 12px 14px;
-    border-radius: 16px;
+    min-height: 62px;
+    padding: 10px 12px;
+    border-radius: 14px;
     background:
       linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.012)),
       rgba(15, 23, 42, 0.62);
@@ -1204,23 +1527,193 @@ onUnmounted(() => {
 
     .overview-card-label {
       color: var(--text-secondary);
-      font-size: 12px;
+      font-size: 11px;
       letter-spacing: 0.04em;
       text-transform: uppercase;
     }
 
     .overview-card-value {
       color: var(--text-primary);
-      font-size: 21px;
+      font-size: 18px;
       font-weight: 700;
       font-family: 'Consolas', 'Monaco', monospace;
     }
 
     .overview-card-code {
       color: var(--text-primary);
-      font-size: 13px;
-      line-height: 1.6;
+      font-size: 12px;
+      line-height: 1.45;
       word-break: break-all;
+    }
+  }
+
+  .master-env-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.026), rgba(255, 255, 255, 0.012)),
+      rgba(15, 23, 42, 0.56);
+
+    &.is-warning {
+      border-color: rgba(245, 158, 11, 0.24);
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(15, 23, 42, 0.56));
+    }
+
+    &.is-danger {
+      border-color: rgba(239, 68, 68, 0.24);
+      background: linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(15, 23, 42, 0.56));
+    }
+  }
+
+  .master-env-summary {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .master-env-copy {
+    min-width: 0;
+
+    strong {
+      display: block;
+      margin-top: 3px;
+      color: var(--text-primary);
+      font-size: 16px;
+    }
+
+    p {
+      margin-top: 4px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+  }
+
+  .master-env-label {
+    color: var(--accent-blue);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .master-env-badges {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .master-env-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .master-env-card {
+    min-height: 68px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(15, 23, 42, 0.52);
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 8px;
+
+    span {
+      color: var(--text-secondary);
+      font-size: 11px;
+    }
+
+    strong {
+      color: var(--text-primary);
+      font-size: 16px;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+  }
+
+  .master-env-warning-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .master-env-warning {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.16);
+    color: #f8d27a;
+    font-size: 11px;
+    line-height: 1.45;
+  }
+
+  .cluster-alert-strip {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+  }
+
+  .cluster-alert-card {
+    min-height: 72px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.024), rgba(255, 255, 255, 0.012)),
+      rgba(15, 23, 42, 0.56);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+
+    &.is-success {
+      border-color: rgba(74, 222, 128, 0.18);
+      background: linear-gradient(135deg, rgba(74, 222, 128, 0.07), rgba(15, 23, 42, 0.56));
+    }
+
+    &.is-warning {
+      border-color: rgba(245, 158, 11, 0.2);
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(15, 23, 42, 0.56));
+    }
+
+    &.is-danger {
+      border-color: rgba(239, 68, 68, 0.2);
+      background: linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(15, 23, 42, 0.56));
+    }
+
+    .cluster-alert-label {
+      color: var(--accent-blue);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    strong {
+      color: var(--text-primary);
+      font-size: 14px;
+      line-height: 1.35;
+    }
+
+    p {
+      color: var(--text-secondary);
+      font-size: 11px;
+      line-height: 1.45;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      overflow: hidden;
     }
   }
 }
@@ -1238,6 +1731,88 @@ onUnmounted(() => {
   box-shadow:
     0 22px 48px rgba(2, 8, 23, 0.12),
     inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.env-badge,
+.env-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+
+  &.is-success {
+    color: #4ade80;
+    border-color: rgba(74, 222, 128, 0.22);
+    background: rgba(74, 222, 128, 0.08);
+  }
+
+  &.is-warning {
+    color: #f8d27a;
+    border-color: rgba(245, 158, 11, 0.2);
+    background: rgba(245, 158, 11, 0.08);
+  }
+
+  &.is-danger {
+    color: #ff8e87;
+    border-color: rgba(239, 68, 68, 0.2);
+    background: rgba(239, 68, 68, 0.08);
+  }
+
+  &.subtle {
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.035);
+  }
+}
+
+.environment-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.environment-cell-top,
+.environment-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.environment-meta {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.conflict-text {
+  font-weight: 600;
+
+  &.is-warning {
+    color: #f8d27a;
+  }
+
+  &.is-danger {
+    color: #ff8e87;
+  }
+
+  &.is-success {
+    color: #4ade80;
+  }
+}
+
+.environment-warning-cell {
+  color: #f8d27a;
+  font-size: 12px;
+  line-height: 1.6;
+
+  &.is-empty {
+    color: var(--text-secondary);
+  }
 }
 
 // 区域标签
@@ -1294,7 +1869,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
 .utility-chip {
@@ -1306,7 +1881,7 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(148, 163, 184, 0.12);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
 }
 
@@ -1326,7 +1901,7 @@ onUnmounted(() => {
   background: transparent;
   border-radius: var(--radius-lg);
   overflow: hidden;
-  min-width: 1120px;
+  min-width: 100%;
   border: none;
 
   :deep(.el-table__header-wrapper) {
@@ -1366,6 +1941,13 @@ onUnmounted(() => {
     align-items: center;
     gap: 10px;
 
+    .node-name-stack {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
     .node-icon {
       font-size: 18px;
       color: var(--accent-blue);
@@ -1378,6 +1960,19 @@ onUnmounted(() => {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+  }
+
+  .node-address-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .node-subtext {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
   }
 
   .address-code {
@@ -1397,6 +1992,14 @@ onUnmounted(() => {
   .time-text {
     color: var(--text-secondary);
     font-size: 13px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.045);
+    border: 1px solid rgba(148, 163, 184, 0.08);
   }
 
   .status-tag {
@@ -1406,7 +2009,7 @@ onUnmounted(() => {
   .status-cell {
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     gap: 6px;
 
     .status-dot {
@@ -1504,38 +2107,32 @@ onUnmounted(() => {
     }
   }
 
+  .connectivity-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
   // 资源使用列样式
   .resource-cell {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 4px 0;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 2px 0;
+  }
 
-    .resource-row {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 11px;
-      line-height: 1.4;
-    }
-
-    .resource-label {
-      width: 28px;
-      color: var(--text-secondary);
-      flex-shrink: 0;
-    }
-
-    .resource-progress {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .resource-value {
-      min-width: 32px;
-      text-align: right;
-      color: var(--text-primary);
-      font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
-    }
+  .resource-badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.045);
+    border: 1px solid rgba(148, 163, 184, 0.1);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
   }
 
   .no-data {
@@ -1543,12 +2140,12 @@ onUnmounted(() => {
     font-size: 13px;
   }
 
-.action-btns {
+  .action-btns {
     display: flex;
     gap: 4px;
     flex-wrap: nowrap;
     overflow: visible;
-    justify-content: flex-start;
+    justify-content: center;
     padding: 4px 6px;
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.025);
@@ -1735,28 +2332,56 @@ onUnmounted(() => {
 }
 
 @media (max-width: 1280px) {
-  .workspace-hero-main {
-    flex-direction: column;
-  }
-
-  .workspace-hero-pills {
+  .page-header-pills {
     justify-content: flex-start;
   }
 
+  .cluster-alert-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .nodes-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .master-config-card {
+    .master-dashboard {
+      grid-template-columns: 1fr;
+    }
+
     .master-overview-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .master-env-summary {
+      flex-direction: column;
+    }
+
+    .master-env-badges {
+      justify-content: flex-start;
+    }
+
+    .master-env-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
 }
 
 @media (max-width: 768px) {
-  .workspace-hero {
+  .page-header-bar {
     padding: 18px;
   }
 
-  .workspace-copy h1 {
+  .page-header-copy h1 {
     font-size: 24px;
+  }
+
+  .cluster-alert-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .nodes-summary-grid {
+    grid-template-columns: 1fr;
   }
 
   .master-config-card {
@@ -1769,12 +2394,20 @@ onUnmounted(() => {
     }
 
     .master-overview-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .master-env-grid {
       grid-template-columns: 1fr;
     }
   }
 
   .section-card {
     padding: 18px;
+  }
+
+  .slaves-table {
+    min-width: 980px;
   }
 }
 

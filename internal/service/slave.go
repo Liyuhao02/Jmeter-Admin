@@ -22,7 +22,7 @@ import (
 
 // ListSlaves 查询所有slave列表
 func ListSlaves() ([]model.Slave, error) {
-	rows, err := database.DB.Query("SELECT id, name, host, port, status, agent_status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, agent_uptime, created_at FROM slaves ORDER BY id DESC")
+	rows, err := database.DB.Query("SELECT id, name, host, port, status, agent_status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, environment_info, agent_uptime, created_at FROM slaves ORDER BY id DESC")
 	if err != nil {
 		return nil, fmt.Errorf("查询slave列表失败: %w", err)
 	}
@@ -34,8 +34,9 @@ func ListSlaves() ([]model.Slave, error) {
 		var lastCheckTime sql.NullString
 		var agentCheckTime sql.NullString
 		var systemStats sql.NullString
+		var environmentInfo sql.NullString
 		var agentStatus sql.NullString
-		if err := rows.Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &agentStatus, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &slave.AgentUptime, &slave.CreatedAt); err != nil {
+		if err := rows.Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &agentStatus, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &environmentInfo, &slave.AgentUptime, &slave.CreatedAt); err != nil {
 			return nil, fmt.Errorf("扫描slave数据失败: %w", err)
 		}
 		if lastCheckTime.Valid {
@@ -46,6 +47,9 @@ func ListSlaves() ([]model.Slave, error) {
 		}
 		if systemStats.Valid {
 			slave.SystemStats = systemStats.String
+		}
+		if environmentInfo.Valid {
+			slave.EnvironmentInfo = environmentInfo.String
 		}
 		if agentStatus.Valid {
 			slave.AgentStatus = agentStatus.String
@@ -140,11 +144,12 @@ func CheckSlave(id int64) (bool, error) {
 	var lastCheckTime sql.NullString
 	var agentCheckTime sql.NullString
 	var systemStats sql.NullString
+	var environmentInfo sql.NullString
 	var agentStatus sql.NullString
 	err := database.DB.QueryRow(
-		"SELECT id, name, host, port, status, agent_status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, agent_uptime, created_at FROM slaves WHERE id = ?",
+		"SELECT id, name, host, port, status, agent_status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, environment_info, agent_uptime, created_at FROM slaves WHERE id = ?",
 		id,
-	).Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &agentStatus, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &slave.AgentUptime, &slave.CreatedAt)
+	).Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &agentStatus, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &environmentInfo, &slave.AgentUptime, &slave.CreatedAt)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -160,6 +165,9 @@ func CheckSlave(id int64) (bool, error) {
 	}
 	if systemStats.Valid {
 		slave.SystemStats = systemStats.String
+	}
+	if environmentInfo.Valid {
+		slave.EnvironmentInfo = environmentInfo.String
 	}
 	if agentStatus.Valid {
 		slave.AgentStatus = agentStatus.String
@@ -196,13 +204,18 @@ func CheckSlave(id int64) (bool, error) {
 
 // DiagnosticResult 诊断结果结构体
 type DiagnosticResult struct {
-	JMeterOnline  bool   `json:"jmeter_online"`
-	AgentOnline   bool   `json:"agent_online"`
-	JMeterError   string `json:"jmeter_error,omitempty"` // "connection_refused" / "timeout" / "unknown"
-	AgentError    string `json:"agent_error,omitempty"`  // "connection_refused" / "timeout" / "auth_failed" / "unknown"
-	JMeterLatency int64  `json:"jmeter_latency_ms"`
-	AgentLatency  int64  `json:"agent_latency_ms"`
-	Suggestion    string `json:"suggestion,omitempty"`
+	JMeterOnline    bool   `json:"jmeter_online"`
+	AgentOnline     bool   `json:"agent_online"`
+	JMeterError     string `json:"jmeter_error,omitempty"` // "connection_refused" / "timeout" / "unknown"
+	AgentError      string `json:"agent_error,omitempty"`  // "connection_refused" / "timeout" / "auth_failed" / "unknown"
+	JMeterLatency   int64  `json:"jmeter_latency_ms"`
+	AgentLatency    int64  `json:"agent_latency_ms"`
+	SystemStats     string `json:"system_stats,omitempty"`
+	EnvironmentInfo string `json:"environment_info,omitempty"`
+	LastCheckTime   string `json:"last_check_time,omitempty"`
+	AgentCheckTime  string `json:"agent_check_time,omitempty"`
+	AgentUptime     int64  `json:"agent_uptime,omitempty"`
+	Suggestion      string `json:"suggestion,omitempty"`
 }
 
 type CallbackReachabilityResult struct {
@@ -289,6 +302,27 @@ func parseAgentSystemStats(raw string) *model.AgentSystemStats {
 		return nil
 	}
 	return &stats
+}
+
+func fetchSlaveEnvironmentInfo(slave *model.Slave, agentOnline bool) string {
+	if slave == nil {
+		return ""
+	}
+	if !agentOnline {
+		return strings.TrimSpace(slave.EnvironmentInfo)
+	}
+
+	report, err := GetSlaveEnvironmentReport(*slave)
+	if err != nil {
+		return strings.TrimSpace(slave.EnvironmentInfo)
+	}
+
+	data, err := json.Marshal(report)
+	if err != nil {
+		return strings.TrimSpace(slave.EnvironmentInfo)
+	}
+
+	return string(data)
 }
 
 func GetSlavePreflightReport(slaveIDs []int64, masterHost string) (*model.SlavePreflightReport, error) {
@@ -521,10 +555,11 @@ func CheckSlaveBoth(id int64) (DiagnosticResult, error) {
 	var agentCheckTime sql.NullString
 	var systemStats sql.NullString
 	var agentStatus sql.NullString
+	var environmentInfo sql.NullString
 	err := database.DB.QueryRow(
-		"SELECT id, name, host, port, status, agent_status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, agent_uptime, created_at FROM slaves WHERE id = ?",
+		"SELECT id, name, host, port, status, agent_status, agent_port, agent_token, last_check_time, agent_check_time, system_stats, environment_info, agent_uptime, created_at FROM slaves WHERE id = ?",
 		id,
-	).Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &agentStatus, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &slave.AgentUptime, &slave.CreatedAt)
+	).Scan(&slave.ID, &slave.Name, &slave.Host, &slave.Port, &slave.Status, &agentStatus, &slave.AgentPort, &slave.AgentToken, &lastCheckTime, &agentCheckTime, &systemStats, &environmentInfo, &slave.AgentUptime, &slave.CreatedAt)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -540,6 +575,9 @@ func CheckSlaveBoth(id int64) (DiagnosticResult, error) {
 	}
 	if systemStats.Valid {
 		slave.SystemStats = systemStats.String
+	}
+	if environmentInfo.Valid {
+		slave.EnvironmentInfo = environmentInfo.String
 	}
 	if agentStatus.Valid {
 		slave.AgentStatus = agentStatus.String
@@ -580,13 +618,20 @@ func CheckSlaveBoth(id int64) (DiagnosticResult, error) {
 		newAgentStatus = "online"
 	}
 
+	environmentInfoJSON := fetchSlaveEnvironmentInfo(&slave, agentResult.Online)
 	_, err = database.DB.Exec(
-		"UPDATE slaves SET status = ?, agent_status = ?, last_check_time = ?, agent_check_time = ?, system_stats = ?, agent_uptime = ? WHERE id = ?",
-		jmeterStatus, newAgentStatus, now, now, agentResult.SystemStats, agentResult.AgentUptime, id,
+		"UPDATE slaves SET status = ?, agent_status = ?, last_check_time = ?, agent_check_time = ?, system_stats = ?, environment_info = ?, agent_uptime = ? WHERE id = ?",
+		jmeterStatus, newAgentStatus, now, now, agentResult.SystemStats, environmentInfoJSON, agentResult.AgentUptime, id,
 	)
 	if err != nil {
 		return result, fmt.Errorf("更新slave状态失败: %w", err)
 	}
+
+	result.SystemStats = agentResult.SystemStats
+	result.EnvironmentInfo = environmentInfoJSON
+	result.LastCheckTime = now
+	result.AgentCheckTime = now
+	result.AgentUptime = agentResult.AgentUptime
 
 	return result, nil
 }
@@ -649,9 +694,10 @@ func checkAllSlaves() {
 			}
 			now := time.Now().Format("2006-01-02 15:04:05")
 
+			environmentInfoJSON := fetchSlaveEnvironmentInfo(&s, agentResult.Online)
 			_, dbErr := database.DB.Exec(
-				"UPDATE slaves SET status = ?, agent_status = ?, last_check_time = ?, agent_check_time = ?, system_stats = ?, agent_uptime = ? WHERE id = ?",
-				jmeterStatus, agentStatus, now, now, agentResult.SystemStats, agentResult.AgentUptime, s.ID,
+				"UPDATE slaves SET status = ?, agent_status = ?, last_check_time = ?, agent_check_time = ?, system_stats = ?, environment_info = ?, agent_uptime = ? WHERE id = ?",
+				jmeterStatus, agentStatus, now, now, agentResult.SystemStats, environmentInfoJSON, agentResult.AgentUptime, s.ID,
 			)
 			if dbErr != nil {
 				log.Printf("心跳检测: 更新 Slave %s 状态失败: %v", s.Name, dbErr)

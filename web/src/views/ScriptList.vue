@@ -294,8 +294,8 @@
           <p>在编辑页面右侧的"关联文件"面板中上传 CSV、JSON 等数据文件。系统会自动检测 JMX 中引用的文件并提示关联状态。</p>
         </div>
         <div class="guide-section">
-          <h3>4. 管理 Slave 节点</h3>
-          <p>在 Slave 管理页面添加 JMeter Slave 节点地址，用于分布式压测。添加后点击"检测"验证连通性。</p>
+          <h3>4. 管理节点</h3>
+          <p>在节点管理页面添加 JMeter Slave 节点地址，用于分布式压测。添加后点击"检测"验证连通性。</p>
         </div>
         <div class="guide-section">
           <h3>5. 执行测试</h3>

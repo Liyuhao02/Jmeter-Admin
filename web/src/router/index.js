@@ -36,7 +36,7 @@ const routes = [
         path: 'slaves',
         name: 'SlaveManage',
         component: SlaveManage,
-        meta: { title: 'Slave管理' }
+        meta: { title: '节点管理' }
       },
       {
         path: 'executions',
